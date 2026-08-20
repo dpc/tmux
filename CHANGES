@@ -1,5 +1,7 @@
 CHANGES FROM 3.7c TO 3.8
 
+* Add copy-mode-cursor-style to set the cursor style in copy mode.
+
 * Many improvements to floating panes:
 
   - new-pane and split-window can now set the title with -T and border lines

@@ -1373,6 +1373,14 @@ const struct options_table_entry options_table[] = {
 	  .text = "Style of search matches in copy mode."
 	},
 
+	{ .name = "copy-mode-cursor-style",
+	  .type = OPTIONS_TABLE_CHOICE,
+	  .scope = OPTIONS_TABLE_WINDOW,
+	  .choices = options_table_cursor_style_list,
+	  .default_num = 0,
+	  .text = "Style of the cursor in copy mode."
+	},
+
 	{ .name = "copy-mode-current-match-style",
 	  .type = OPTIONS_TABLE_STRING,
 	  .scope = OPTIONS_TABLE_WINDOW,
