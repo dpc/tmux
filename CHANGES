@@ -1,5 +1,7 @@
 CHANGES FROM 3.7a TO 3.7b
 
+* Add copy-mode-cursor-style to set the cursor style in copy mode.
+
 * Fix so that the end of a synchronized update again triggers a redraw.
 
 CHANGES FROM 3.7 TO 3.7a
