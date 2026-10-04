@@ -1111,6 +1111,18 @@ The flags are:
 .Bl -tag -width Ds
 .It active\-pane
 the client has an independent active pane
+.It clipboard\-fence
+explicitly opt this attachment into native OSC 5522 mediation.
+Off by default.
+Use only when the immediate terminal peer has a verified ordered clipboard
+cancellation contract: mode-off revokes old work, an already-started packet
+finishes, and no old worker can emit packets after a subsequent clipboard
+inventory response.
+A positive mode 5522 probe is also required; terminal names and versions do
+not imply this contract.
+Each attachment, including each nested tmux hop, must opt in explicitly.
+Removing the flag revokes mediation but does not erase pending framing or
+cancellation obligations.
 .It ignore\-size
 the client does not affect the size of other clients
 .It no\-detach\-on\-destroy
@@ -7060,6 +7072,7 @@ The following variables are available, where appropriate:
 .It Li "client_activity" Ta "" Ta "Time client last had activity"
 .It Li "client_cell_height" Ta "" Ta "Height of each client cell in pixels"
 .It Li "client_cell_width" Ta "" Ta "Width of each client cell in pixels"
+.It Li "client_clipboard_state" Ta "" Ta "Clipboard handoff state: inactive, normal, draining, quarantined or quarantined-ready"
 .It Li "client_colours" Ta "" Ta "Number of colours client supports"
 .It Li "client_control_mode" Ta "" Ta "1 if client is in control mode"
 .It Li "client_created" Ta "" Ta "Time client created"

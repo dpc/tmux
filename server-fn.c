@@ -170,6 +170,9 @@ server_lock_client(struct client *c)
 	if (*cmd == '\0' || strlen(cmd) + 1 > MAX_IMSGSIZE - IMSG_HEADER_SIZE)
 		return;
 
+	if (!clipboard_drain(&c->tty, 2))
+		return;
+	clipboard_handoff_done(&c->tty);
 	tty_stop_tty(&c->tty);
 	tty_raw(&c->tty, tty_term_string(c->tty.term, TTYC_SMCUP));
 	tty_raw(&c->tty, tty_term_string(c->tty.term, TTYC_CLEAR));

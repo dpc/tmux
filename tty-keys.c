@@ -758,7 +758,20 @@ tty_keys_next(struct tty *tty)
 	len = EVBUFFER_LENGTH(tty->in);
 	if (len == 0)
 		return (0);
-	log_debug("%s: keys are %zu (%.*s)", c->name, len, (int)len, buf);
+	/* Consume sensitive protocol input before all keyboard diagnostics. */
+	switch (clipboard_key(tty, buf, len, &size)) {
+	case 0:
+		if (event_initialized(&tty->key_timer))
+			evtimer_del(&tty->key_timer);
+		tty->flags &= ~TTY_TIMER;
+		evbuffer_drain(tty->in, size);
+		return (1);
+	case 1:
+		return (0);
+	case 2:
+		goto partial_key;
+	}
+	log_debug("%s: keys are %zu bytes", c->name, len);
 
 	/* Is this a clipboard response? */
 	switch (tty_keys_clipboard(tty, buf, len, &size)) {

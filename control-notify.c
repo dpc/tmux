@@ -181,6 +181,18 @@ control_notify_client_detached(struct client *cc)
 }
 
 void
+control_notify_clipboard_handoff_failed(struct client *cc)
+{
+	struct client *c;
+
+	TAILQ_FOREACH(c, &clients, entry) {
+		if (CONTROL_SHOULD_NOTIFY_CLIENT(c))
+			control_write(c, "%%clipboard-handoff-failed %s "
+			    "quarantined not-locked", cc->name);
+	}
+}
+
+void
 control_notify_session_renamed(struct session *s)
 {
 	struct client	*c;

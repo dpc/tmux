@@ -64,10 +64,14 @@ cmd_detach_client_exec(struct cmd *self, struct cmdq_item *item)
 	struct session		*s;
 	enum msgtype		 msgtype;
 	const char		*cmd = args_get(args, 'E');
+	struct clipboard_wait	*wait;
+	enum cmd_retval		 result;
 
 	if (cmd_get_entry(self) == &cmd_suspend_client_entry) {
+		wait = clipboard_wait_begin(item);
 		server_client_suspend(tc);
-		return (CMD_RETURN_NORMAL);
+		clipboard_wait_add(wait, tc);
+		return (clipboard_wait_end(wait));
 	}
 
 	if (c->flags & CLIENT_READONLY) {
@@ -81,20 +85,23 @@ cmd_detach_client_exec(struct cmd *self, struct cmdq_item *item)
 		msgtype = MSG_DETACHKILL;
 	else
 		msgtype = MSG_DETACH;
+	wait = clipboard_wait_begin(item);
 
 	if (args_has(args, 's')) {
 		s = source->s;
 		if (s == NULL)
-			return (CMD_RETURN_NORMAL);
+			return (clipboard_wait_end(wait));
 		TAILQ_FOREACH(loop, &clients, entry) {
 			if (loop->session == s) {
 				if (cmd != NULL)
 					server_client_exec(loop, cmd);
 				else
 					server_client_detach(loop, msgtype);
+				clipboard_wait_add(wait, loop);
 			}
 		}
-		return (CMD_RETURN_STOP);
+		result = clipboard_wait_end(wait);
+		return (result == CMD_RETURN_NORMAL ? CMD_RETURN_STOP : result);
 	}
 
 	if (args_has(args, 'a')) {
@@ -104,14 +111,17 @@ cmd_detach_client_exec(struct cmd *self, struct cmdq_item *item)
 					server_client_exec(loop, cmd);
 				else
 					server_client_detach(loop, msgtype);
+				clipboard_wait_add(wait, loop);
 			}
 		}
-		return (CMD_RETURN_NORMAL);
+		return (clipboard_wait_end(wait));
 	}
 
 	if (cmd != NULL)
 		server_client_exec(tc, cmd);
 	else
 		server_client_detach(tc, msgtype);
-	return (CMD_RETURN_STOP);
+	clipboard_wait_add(wait, tc);
+	result = clipboard_wait_end(wait);
+	return (result == CMD_RETURN_NORMAL ? CMD_RETURN_STOP : result);
 }

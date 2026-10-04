@@ -66,6 +66,8 @@ cmd_lock_server_exec(struct cmd *self, struct cmdq_item *item)
 {
 	struct cmd_find_state	*target = cmdq_get_target(item);
 	struct client		*tc = cmdq_get_target_client(item);
+	struct client		*c;
+	struct clipboard_wait	*wait = clipboard_wait_begin(item);
 
 	if (cmd_get_entry(self) == &cmd_lock_server_entry)
 		server_lock();
@@ -73,7 +75,14 @@ cmd_lock_server_exec(struct cmd *self, struct cmdq_item *item)
 		server_lock_session(target->s);
 	else
 		server_lock_client(tc);
+	TAILQ_FOREACH(c, &clients, entry) {
+		if (cmd_get_entry(self) == &cmd_lock_server_entry ||
+		    (cmd_get_entry(self) == &cmd_lock_session_entry &&
+		    c->session == target->s) ||
+		    (cmd_get_entry(self) == &cmd_lock_client_entry && c == tc))
+			clipboard_wait_add(wait, c);
+	}
 	recalculate_sizes();
 
-	return (CMD_RETURN_NORMAL);
+	return (clipboard_wait_end(wait));
 }

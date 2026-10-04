@@ -687,6 +687,7 @@ enum tty_code_code {
 #define MODE_KEYS_EXTENDED_2 0x40000
 #define MODE_THEME_UPDATES 0x80000
 #define MODE_SYNC 0x100000
+#define MODE_CLIPBOARD 0x200000
 
 #define ALL_MODES 0xffffff
 #define ALL_MOUSE_MODES (MODE_MOUSE_STANDARD|MODE_MOUSE_BUTTON|MODE_MOUSE_ALL)
@@ -1698,6 +1699,10 @@ struct tty_style_ctx {
 /* Client terminal. */
 struct tty {
 	struct client	*client;
+	struct clipboard	*clipboard;
+	int		 clipboard_discard;
+	int		 clipboard_report;
+	int		 clipboard_escape;
 	struct event	 start_timer;
 	struct event	 clipboard_timer;
 	time_t		 last_requests;
@@ -2251,6 +2256,7 @@ struct client {
 #define CLIENT_ASSUMEPASTING 0x2000000000ULL
 /* 0x4000000000ULL unused */
 #define CLIENT_NO_DETACH_ON_DESTROY 0x8000000000ULL
+#define CLIENT_CLIPBOARD_FENCE 0x10000000000ULL
 #define CLIENT_ALLREDRAWFLAGS		\
 	(CLIENT_REDRAWWINDOW|		\
 	 CLIENT_REDRAWSTATUS|		\
@@ -2787,6 +2793,29 @@ struct environ *environ_for_session(struct session *, int);
 /* tty-draw.c */
 void	tty_draw_line(struct tty *, struct screen *, u_int, u_int, u_int,
 	    u_int, u_int, const struct tty_style_ctx *);
+
+/* clipboard.c */
+struct clipboard_wait;
+struct clipboard_wait *clipboard_wait_begin(struct cmdq_item *);
+void	clipboard_wait_add(struct clipboard_wait *, struct client *);
+enum cmd_retval clipboard_wait_end(struct clipboard_wait *);
+const char *clipboard_state(struct tty *);
+void	clipboard_handoff_done(struct tty *);
+void	clipboard_start(struct tty *);
+void	clipboard_stop(struct tty *);
+void	clipboard_sync(struct tty *);
+int	clipboard_query(struct window_pane *);
+void	clipboard_request(struct window_pane *, const char *);
+int	clipboard_key(struct tty *, const char *, size_t, size_t *);
+int	clipboard_blocked(struct window_pane *);
+void	clipboard_reset_pane(struct window_pane *);
+void	clipboard_invalid_write(struct window_pane *);
+void	clipboard_pane_drained(struct window_pane *);
+void	clipboard_written(struct tty *, size_t);
+int	clipboard_drain(struct tty *, int);
+int	clipboard_closing(struct tty *);
+int	clipboard_defer_exec(struct tty *, const char *);
+int	clipboard_partial_output(struct tty *);
 
 /* tty.c */
 void	tty_create_log(void);
@@ -3911,6 +3940,7 @@ void	control_notify_window_linked(struct session *, struct window *);
 void	control_notify_window_renamed(struct window *);
 void	control_notify_client_session_changed(struct client *);
 void	control_notify_client_detached(struct client *);
+void	control_notify_clipboard_handoff_failed(struct client *);
 void	control_notify_session_renamed(struct session *);
 void	control_notify_session_created(struct session *);
 void	control_notify_session_closed(struct session *);

@@ -1553,6 +1553,15 @@ format_cb_client_control_mode(struct format_tree *ft)
 	return (NULL);
 }
 
+/* Callback for client_clipboard_state. */
+static void *
+format_cb_client_clipboard_state(struct format_tree *ft)
+{
+	if (ft->c != NULL)
+		return (xstrdup(clipboard_state(&ft->c->tty)));
+	return (NULL);
+}
+
 /* Callback for client_discarded. */
 static void *
 format_cb_client_discarded(struct format_tree *ft)
@@ -3303,6 +3312,9 @@ static const struct format_table_entry format_table[] = {
 	},
 	{ "client_cell_width", FORMAT_TABLE_STRING,
 	  format_cb_client_cell_width
+	},
+	{ "client_clipboard_state", FORMAT_TABLE_STRING,
+	  format_cb_client_clipboard_state
 	},
 	{ "client_colours", FORMAT_TABLE_STRING,
 	  format_cb_client_colours

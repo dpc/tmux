@@ -118,6 +118,8 @@ struct input_ctx {
 #define INPUT_BUF_START 32
 	u_char			       *input_buf;
 	size_t				input_len;
+	int				clipboard_escape;
+	int				clipboard_prefix_invalid;
 	size_t				input_space;
 	enum input_end_type		input_end;
 
@@ -802,6 +804,13 @@ input_ground_timer_callback(__unused int fd, __unused short events, void *arg)
 	struct input_ctx	*ictx = arg;
 
 	log_debug("%s: %s expired" , __func__, ictx->state->name);
+	if (ictx->state == &input_state_osc_string &&
+	    ictx->input_len >= 5 &&
+	    strncmp(ictx->input_buf, "5522;", 5) == 0) {
+		ictx->flags |= INPUT_DISCARD;
+		clipboard_invalid_write(ictx->wp);
+		return; /* Consume through terminator, not into screen/log output. */
+	}
 	input_reset(ictx, 0);
 }
 
@@ -918,6 +927,7 @@ input_reset(struct input_ctx *ictx, int clear)
 	input_reset_cell(ictx);
 
 	if (clear && wp != NULL) {
+		clipboard_reset_pane(wp);
 		if (TAILQ_EMPTY(&wp->modes))
 			screen_write_start_pane(sctx, wp, &wp->base);
 		else
@@ -962,6 +972,47 @@ input_parse(struct input_ctx *ictx, const u_char *buf, size_t len)
 	/* Parse the input. */
 	while (off < len) {
 		ictx->ch = buf[off++];
+		if (ictx->state == &input_state_osc_string &&
+		    ictx->input_len < 5 &&
+		    (ictx->ch < 0x20 || ictx->ch > 0x7e))
+			ictx->clipboard_prefix_invalid = 1;
+
+		/*
+		 * Native clipboard data must not inherit OSC's C0 stripping or
+		 * dispatch-at-ESC behavior: either changes malformed base64 into
+		 * apparently valid clipboard bytes. Await the actual terminator.
+		 */
+		if (ictx->state == &input_state_osc_string &&
+		    ictx->input_len >= 5 &&
+		    strncmp(ictx->input_buf, "5522;", 5) == 0) {
+			if (ictx->ch == '\007' ||
+			    (ictx->clipboard_escape && ictx->ch == '\\')) {
+				if (ictx->ch == '\007' && ictx->clipboard_escape) {
+					ictx->flags |= INPUT_DISCARD;
+					clipboard_invalid_write(ictx->wp);
+				}
+				input_exit_osc(ictx);
+				ictx->state = &input_state_ground;
+				input_ground(ictx);
+				ictx->clipboard_escape = 0;
+			} else if (ictx->ch == '\033') {
+				if (ictx->clipboard_escape) {
+					ictx->flags |= INPUT_DISCARD;
+					clipboard_invalid_write(ictx->wp);
+				}
+				ictx->clipboard_escape = 1;
+			} else {
+				if (ictx->clipboard_escape ||
+				    ictx->ch < 0x20 || ictx->ch > 0x7e)
+					ictx->flags |= INPUT_DISCARD;
+				ictx->clipboard_escape = 0;
+				if (!(ictx->flags & INPUT_DISCARD))
+					input_input(ictx);
+				if (ictx->flags & INPUT_DISCARD)
+					clipboard_invalid_write(ictx->wp);
+			}
+			continue;
+		}
 
 		/* Find the transition. */
 		if (ictx->state != state ||
@@ -1044,8 +1095,8 @@ input_parse_buffer(struct window_pane *wp, const u_char *buf, size_t len)
 	else
 		screen_write_start(sctx, &wp->base);
 
-	log_debug("%s: %%%u %s, %zu bytes: %.*s", __func__, wp->id,
-	    ictx->state->name, len, (int)len, buf);
+	log_debug("%s: %%%u %s, %zu bytes", __func__, wp->id,
+	    ictx->state->name, len);
 
 	input_parse(ictx, buf, len);
 	screen_write_stop(sctx);
@@ -1183,6 +1234,8 @@ input_clear(struct input_ctx *ictx)
 
 	*ictx->input_buf = '\0';
 	ictx->input_len = 0;
+	ictx->clipboard_escape = 0;
+	ictx->clipboard_prefix_invalid = 0;
 
 	ictx->input_end = INPUT_END_ST;
 
@@ -1682,6 +1735,11 @@ input_csi_dispatch(struct input_ctx *ictx)
 		case 2004:	/* bracketed paste */
 			n = (s->mode & MODE_BRACKETPASTE) ? 1 : 2;
 			break;
+		case 5522:
+			n = clipboard_query(ictx->wp);
+			if (n == -1)
+				return (0);
+			break;
 		case 2026:	/* synchronized output */
 			n = (s->mode & MODE_SYNC) ? 1 : 2;
 			break;
@@ -1953,6 +2011,11 @@ input_csi_dispatch_rm_private(struct input_ctx *ictx)
 		case 2004:
 			screen_write_mode_clear(sctx, MODE_BRACKETPASTE);
 			break;
+		case 5522:
+			screen_write_mode_clear(sctx, MODE_CLIPBOARD);
+			if (ictx->wp != NULL)
+				clipboard_reset_pane(ictx->wp);
+			break;
 		case 2026:
 			screen_write_stop_sync(ictx->wp);
 			break;
@@ -2055,6 +2118,9 @@ input_csi_dispatch_sm_private(struct input_ctx *ictx)
 			break;
 		case 2004:
 			screen_write_mode_set(sctx, MODE_BRACKETPASTE);
+			break;
+		case 5522:
+			screen_write_mode_set(sctx, MODE_CLIPBOARD);
 			break;
 		case 2031:
 			screen_write_mode_set(sctx, MODE_THEME_UPDATES);
@@ -2648,7 +2714,7 @@ input_dcs_dispatch(struct input_ctx *ictx)
 	allow_passthrough = options_get_number(oo, "allow-passthrough");
 	if (!allow_passthrough)
 		return (0);
-	log_debug("%s: \"%s\"", __func__, buf);
+	log_debug("%s: %zu bytes", __func__, len);
 
 	if (len >= prefixlen && strncmp(buf, prefix, prefixlen) == 0) {
 		screen_write_rawstring(sctx, buf + prefixlen, len - prefixlen,
@@ -2678,17 +2744,26 @@ input_exit_osc(struct input_ctx *ictx)
 	u_char			*p = ictx->input_buf;
 	u_int			 option;
 
-	if (ictx->flags & INPUT_DISCARD)
+	if (ictx->flags & INPUT_DISCARD) {
+		if (ictx->input_len >= 5 &&
+		    strncmp(p, "5522;", 5) == 0)
+			clipboard_invalid_write(wp);
 		return;
+	}
 	if (ictx->input_len < 1 || *p < '0' || *p > '9')
 		return;
 
-	log_debug("%s: \"%s\" (end %s)", __func__, p,
+	log_debug("%s: %zu bytes (end %s)", __func__, ictx->input_len,
 	    ictx->input_end == INPUT_END_ST ? "ST" : "BEL");
 
 	option = 0;
-	while (*p >= '0' && *p <= '9')
+	while (*p >= '0' && *p <= '9') {
+		if (option > (UINT_MAX - (*p - '0')) / 10) {
+			clipboard_invalid_write(wp);
+			return;
+		}
 		option = option * 10 + *p++ - '0';
+	}
 	if (*p != ';' && *p != '\0')
 		return;
 	if (*p == ';')
@@ -2731,6 +2806,13 @@ input_exit_osc(struct input_ctx *ictx)
 		break;
 	case 52:
 		input_osc_52(ictx, p);
+		break;
+	case 5522:
+		if (ictx->clipboard_prefix_invalid ||
+		    strncmp(ictx->input_buf, "5522;", 5) != 0)
+			clipboard_invalid_write(wp);
+		else
+			clipboard_request(wp, p);
 		break;
 	case 104:
 		input_osc_104(ictx, p);

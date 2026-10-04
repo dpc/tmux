@@ -1225,6 +1225,7 @@ window_pane_scrollbar_redraw_visibility(struct window_pane *wp)
 static void
 window_pane_destroy(struct window_pane *wp)
 {
+	clipboard_reset_pane(wp);
 	window_pane_wait_finish(wp);
 	spawn_editor_finish(wp);
 
@@ -1316,6 +1317,12 @@ window_pane_read_callback(__unused struct bufferevent *bufev, void *data)
 }
 
 static void
+window_pane_write_callback(__unused struct bufferevent *bufev, void *data)
+{
+	clipboard_pane_drained(data);
+}
+
+static void
 window_pane_error_callback(__unused struct bufferevent *bufev,
     __unused short what, void *data)
 {
@@ -1334,7 +1341,7 @@ window_pane_set_event(struct window_pane *wp)
 	setblocking(wp->fd, 0);
 
 	wp->event = bufferevent_new(wp->fd, window_pane_read_callback,
-	    NULL, window_pane_error_callback, wp);
+	    window_pane_write_callback, window_pane_error_callback, wp);
 	if (wp->event == NULL)
 		fatalx("out of memory");
 	wp->ictx = input_init(wp, wp->event, &wp->palette, NULL);

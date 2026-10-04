@@ -255,6 +255,15 @@ tty_write_callback(__unused int fd, __unused short events, void *data)
 	nwrite = evbuffer_write(tty->out, c->fd);
 	if (nwrite == -1)
 		return;
+	clipboard_written(tty, nwrite);
+	if (EVBUFFER_LENGTH(tty->out) == 0 &&
+	    (tty->flags & TTY_NOBLOCK) && tty->discarded != 0 &&
+	    !(tty->flags & TTY_BLOCK)) {
+		c->flags |= CLIENT_ALLREDRAWFLAGS;
+		c->discarded += tty->discarded;
+		tty->discarded = 0;
+		tty_invalidate(tty);
+	}
 	log_debug("%s: wrote %d bytes (of %zu)", c->name, nwrite, size);
 
 	if (c->redraw > 0) {
@@ -380,6 +389,7 @@ tty_start_tty(struct tty *tty)
 	tty_start_start_timer(tty);
 
 	tty->flags |= TTY_STARTED;
+	clipboard_start(tty);
 	tty_invalidate(tty);
 
 	if (tty->ccolour != -1)
@@ -441,9 +451,15 @@ tty_stop_tty(struct tty *tty)
 {
 	struct client	*c = tty->client;
 	struct winsize	 ws;
+	int		 partial;
 
 	if (!(tty->flags & TTY_STARTED))
 		return;
+	partial = clipboard_partial_output(tty);
+	/* Orderly stops have drained; never splice cleanup into a lost frame. */
+	if (tty->clipboard != NULL && !partial)
+		tty_raw(tty, "\033[?5522l");
+	clipboard_stop(tty);
 	tty->flags &= ~TTY_STARTED;
 
 	evtimer_del(&tty->start_timer);
@@ -464,6 +480,8 @@ tty_stop_tty(struct tty *tty)
 		return;
 	if (tcsetattr(c->fd, TCSANOW, &tty->tio) == -1)
 		return;
+	if (partial)
+		return; /* Hard disconnect: no longer possible to finish this OSC. */
 
 	tty_raw(tty, tty_term_string_ii(tty->term, TTYC_CSR, 0, ws.ws_row - 1));
 	if (tty_acs_needed(tty))
@@ -628,13 +646,15 @@ tty_add(struct tty *tty, const char *buf, size_t len)
 {
 	struct client	*c = tty->client;
 
-	if (tty->flags & TTY_BLOCK) {
+	if (clipboard_closing(tty) || (tty->flags & TTY_BLOCK) ||
+	    ((tty->flags & TTY_NOBLOCK) &&
+	    EVBUFFER_LENGTH(tty->out) >= 256 * 1024)) {
 		tty->discarded += len;
 		return;
 	}
 
 	evbuffer_add(tty->out, buf, len);
-	log_debug("%s: %.*s", c->name, (int)len, buf);
+	log_debug("%s: added %zu bytes", c->name, len);
 	c->written += len;
 
 	if (tty_log_fd != -1)
@@ -2150,8 +2170,17 @@ tty_set_selection(struct tty *tty, const char *clip, const char *buf,
 void
 tty_cmd_rawstring(struct tty *tty, const struct tty_ctx *ctx)
 {
+	if (clipboard_closing(tty))
+		return;
+	/*
+	 * A passthrough may contain private clipboard metadata, including split
+	 * fragments. Do not put arbitrary passthrough bytes in the raw tty log.
+	 */
 	tty->flags |= TTY_NOBLOCK;
-	tty_add(tty, ctx->data.data, ctx->data.size);
+	evbuffer_add(tty->out, ctx->data.data, ctx->data.size);
+	tty->client->written += ctx->data.size;
+	if (tty->flags & TTY_STARTED)
+		event_add(&tty->event_out, NULL);
 	tty_invalidate(tty);
 }
 

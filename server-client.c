@@ -553,6 +553,9 @@ server_client_suspend(struct client *c)
 	if (s == NULL || (c->flags & CLIENT_UNATTACHEDFLAGS))
 		return;
 
+	if (!clipboard_drain(&c->tty, 1))
+		return;
+	clipboard_handoff_done(&c->tty);
 	tty_stop_tty(&c->tty);
 	c->flags |= CLIENT_SUSPENDED;
 	proc_send(c->peer, MSG_SUSPEND, -1, NULL, 0);
@@ -565,6 +568,9 @@ server_client_detach(struct client *c, enum msgtype msgtype)
 	struct session	*s = c->session;
 
 	if (s == NULL || (c->flags & CLIENT_NODETACHFLAGS))
+		return;
+	clipboard_drain(&c->tty, 0);
+	if (strncmp(clipboard_state(&c->tty), "quarantined", 11) == 0)
 		return;
 
 	c->flags |= CLIENT_EXIT;
@@ -585,6 +591,9 @@ server_client_exec(struct client *c, const char *cmd)
 
 	if (*cmd == '\0')
 		return;
+	if (!clipboard_defer_exec(&c->tty, cmd))
+		return;
+	clipboard_handoff_done(&c->tty);
 	cmdsize = strlen(cmd) + 1;
 
 	if (s != NULL)
@@ -1337,7 +1346,8 @@ server_client_key_callback(struct cmdq_item *item, void *data)
 	s = c->session;
 
 	/* Check the client is good to accept input. */
-	if (s == NULL || (c->flags & CLIENT_UNATTACHEDFLAGS))
+	if (s == NULL || (c->flags & CLIENT_UNATTACHEDFLAGS) ||
+	    clipboard_closing(&c->tty))
 		goto out;
 	wl = s->curw;
 
@@ -1599,7 +1609,8 @@ server_client_handle_key0(struct client *c, struct key_event *event,
 	struct window_pane	*wp;
 
 	/* Check the client is good to accept input. */
-	if (s == NULL || (c->flags & CLIENT_UNATTACHEDFLAGS))
+	if (s == NULL || (c->flags & CLIENT_UNATTACHEDFLAGS) ||
+	    clipboard_closing(&c->tty))
 		return (0);
 
 	/*
@@ -1936,7 +1947,7 @@ out:
 	 * accept any more data.
 	 */
 	log_debug("%s: pane %%%u is %s", __func__, wp->id, off ? "off" : "on");
-	if (off)
+	if (off || clipboard_blocked(wp))
 		bufferevent_disable(wp->event, EV_READ);
 	else
 		bufferevent_enable(wp->event, EV_READ);
@@ -2103,6 +2114,7 @@ server_client_reset_state(struct client *c)
 		mode &= ~MODE_BRACKETPASTE;
 
 	/* Set the terminal mode and reset attributes. */
+	clipboard_sync(tty);
 	tty_update_mode(tty, mode, s);
 	tty_reset(tty);
 
@@ -2162,6 +2174,10 @@ server_client_check_exit(struct client *c)
 		return;
 	if (~c->flags & CLIENT_EXIT)
 		return;
+	if (c->exit_type == CLIENT_EXIT_DETACH &&
+	    !clipboard_drain(&c->tty, 0))
+		return;
+	clipboard_handoff_done(&c->tty);
 
 	if (c->flags & CLIENT_CONTROL) {
 		control_discard(c);
@@ -2873,6 +2889,8 @@ server_client_set_flags(struct client *c, const char *flags)
 			flag = CLIENT_IGNORESIZE;
 		else if (strcmp(next, "active-pane") == 0)
 			flag = CLIENT_ACTIVEPANE;
+		else if (strcmp(next, "clipboard-fence") == 0)
+			flag = CLIENT_CLIPBOARD_FENCE;
 		else if (strcmp(next, "no-detach-on-destroy") == 0)
 			flag = CLIENT_NO_DETACH_ON_DESTROY;
 		if (flag == 0)
@@ -2889,6 +2907,7 @@ server_client_set_flags(struct client *c, const char *flags)
 			control_reset_offsets(c);
 	}
 	free(copy);
+	clipboard_sync(&c->tty);
 	proc_send(c->peer, MSG_FLAGS, -1, &c->flags, sizeof c->flags);
 }
 
@@ -2923,6 +2942,8 @@ server_client_get_flags(struct client *c)
 		strlcat(s, "read-only,", sizeof s);
 	if (c->flags & CLIENT_ACTIVEPANE)
 		strlcat(s, "active-pane,", sizeof s);
+	if (c->flags & CLIENT_CLIPBOARD_FENCE)
+		strlcat(s, "clipboard-fence,", sizeof s);
 	if (c->flags & CLIENT_SUSPENDED)
 		strlcat(s, "suspended,", sizeof s);
 	if (c->flags & CLIENT_UTF8)
