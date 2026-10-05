@@ -101,10 +101,15 @@ def response(ident, status, data=None, mime=None, kind=b"read"):
 
 
 class Server:
-    def __init__(self, binary, root, name):
+    def __init__(self, binary, root, name, native=False):
         self.binary = binary
         self.root = root
         self.args = [binary, "-S", os.path.join(root, name), "-f", "/dev/null"]
+        if native:
+            config = os.path.join(root, name + ".conf")
+            with open(config, "w") as f:
+                f.write("set -s native-clipboard on\n")
+            self.args[-1] = config
         self.children = []
         self.sockets = []
         self.count = 0
@@ -118,7 +123,7 @@ class Server:
                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE)
 
-    def pane(self, first=False):
+    def pane(self, first=False, attached=False):
         self.count += 1
         path = os.path.join(self.root, "app-%s-%d" % (os.path.basename(self.args[2]), self.count))
         listener = socket.socket(socket.AF_UNIX)
@@ -126,7 +131,21 @@ class Server:
         listener.listen()
         listener.settimeout(5)
         command = shlex.join([sys.executable, os.path.abspath(__file__), "--helper", path])
-        if first:
+        if attached:
+            pid, fd = os.forkpty()
+            if pid == 0:
+                os.environ["TERM"] = "xterm-256color"
+                os.environ.pop("TMUX", None)
+                os.chdir(self.root)
+                os.execv(self.binary, self.args + [
+                    "new-session", "-s", "clip", command])
+            self.children.append((pid, fd))
+            terminal = Stream(fd)
+            terminal.until(b"\x1b[?5522$p")
+            os.write(fd, b"\x1b[?5522;2$y")
+            self.initial_terminal = fd, terminal
+            pane = self.run("list-panes", "-F", "#{pane_id}").strip().decode()
+        elif first:
             pane = self.run("-vv", "new-session", "-d", "-s", "clip", "-P",
                             "-F", "#{pane_id}", command).strip().decode()
         else:
@@ -183,11 +202,11 @@ def command_ok(command):
 def main(binary):
     binary = os.path.abspath(binary)
     with tempfile.TemporaryDirectory(prefix="tmux-clipboard-") as root:
-        server = Server(binary, root, "outer")
-        inner = Server(binary, root, "inner")
+        server = Server(binary, root, "outer", native=True)
+        inner = Server(binary, root, "inner", native=True)
         try:
             pane, app, incoming = server.pane(first=True)
-            fd, terminal = server.attach()
+            fd, terminal = server.attach(verified=False)
             app.sendall(b"\x1b[?5522$p")
             incoming.until(b"\x1b[?5522;2$y")
             app.sendall(b"\x1b[?2004h\x1b[?5522h")
@@ -543,11 +562,15 @@ def main(binary):
 
             # A real nested server probes through the outer one and remaps twice.
             _, nested_app, nested_input = inner.pane(first=True)
+            inner.run("set-option", "-s", "native-clipboard", "off")
             command = shlex.join(inner.args + [
-                "attach-session", "-t", "clip", "-f", "clipboard-fence"])
+                "attach-session", "-t", "clip"])
             nested_pane = server.run("new-window", "-P", "-F", "#{pane_id}",
                                      command).strip().decode()
             time.sleep(0.3)
+            nested_app.sendall(b"\x1b[?5522$p")
+            nested_input.until(b"\x1b[?5522;0$y")
+            inner.run("set-option", "-s", "native-clipboard", "on")
             nested_app.sendall(b"\x1b[?5522$p")
             nested_input.until(b"\x1b[?5522;2$y")
             nested_app.sendall(b"\x1b[?5522h")
@@ -718,11 +741,11 @@ def main(binary):
 
             # Failure is bounded, explicit and isolated, never an alleged lock.
             for action in ("lock", "suspend", "detach", "exec"):
-                isolated = Server(binary, root, "fail-" + action)
+                isolated = Server(binary, root, "fail-" + action, native=True)
                 monitor = None
                 try:
                     _, a, inp = isolated.pane(first=True)
-                    qfd, qout = isolated.attach()
+                    qfd, qout = isolated.attach(verified=False)
                     a.sendall(b"\x1b[?5522$p")
                     inp.until(b"\x1b[?5522;2$y")
                     target = isolated.run("list-clients", "-F",
@@ -785,6 +808,12 @@ def main(binary):
                     _, error = retry.communicate(timeout=1)
                     assert retry.returncode != 0 and b"quarantined" in error
                     if action == "lock":
+                        for setting in ("off", "on"):
+                            isolated.run("set-option", "-s",
+                                         "native-clipboard", setting)
+                            states = isolated.run("list-clients", "-F",
+                                "#{client_name} #{client_clipboard_state}")
+                            assert target.encode() + b" quarantined" in states
                         isolated.run("refresh-client", "-t", target,
                                      "-f", "!clipboard-fence")
                         isolated.run("refresh-client", "-t", target,
@@ -793,7 +822,14 @@ def main(binary):
                             "#{client_name} #{client_clipboard_state}")
                         assert target.encode() + b" quarantined" in states
                         # Late full proof changes state only. It does not lock.
-                        os.write(qfd, response(cut_id, b"OK") +
+                        opening = response(cut_id, b"OK")
+                        os.write(qfd, opening[:-2])
+                        time.sleep(0.05)
+                        isolated.run("set-option", "-s", "native-clipboard", "off")
+                        isolated.run("refresh-client", "-t", target,
+                                     "-f", "!clipboard-fence")
+                        isolated.run("set-option", "-s", "native-clipboard", "on")
+                        os.write(qfd, opening[-2:] +
                                  response(cut_id, b"DATA", b"Lg==", b".") +
                                  response(cut_id, b"DONE"))
                         time.sleep(0.1)
@@ -840,11 +876,80 @@ def main(binary):
             finally:
                 gated.close()
 
+            # Config-only ordinary new-session, live inherited option changes,
+            # and explicit legacy overrides in both directions.
+            configured = Server(binary, root, "configured", native=True)
+            try:
+                _, a, inp = configured.pane(attached=True)
+                cfd, cout = configured.initial_terminal
+                target = configured.run("list-clients", "-F",
+                                        "#{client_name}").strip().decode()
+                assert b"clipboard-fence" not in configured.run(
+                    "list-clients", "-F", "#{client_flags}")
+                a.sendall(b"\x1b[?5522$p")
+                inp.until(b"\x1b[?5522;2$y")
+                # Revocation cancels an ordinary request even with mode off.
+                a.sendall(osc(b"type=write:id=disable-option"))
+                ident = cout.frame()[0][b"id"]
+                configured.run("set-option", "-s", "native-clipboard", "off")
+                cout.until(b"\x1b[?5522l")
+                os.write(cfd, response(ident, b"DONE", kind=b"write"))
+                assert inp.quiet() == b""
+                a.sendall(b"\x1b[?5522$p")
+                inp.until(b"\x1b[?5522;0$y")
+                a.sendall(osc(b"type=read:id=option-off", b"Lg=="))
+                assert inp.frame()[0][b"status"] == b"ENOSYS"
+                configured.run("set-option", "-s", "native-clipboard", "on")
+                a.sendall(b"\x1b[?5522h\x1b[?5522$p")
+                inp.until(b"\x1b[?5522;1$y")
+                cout.until(b"\x1b[?5522h")
+                configured.run("set-option", "-s", "native-clipboard", "off")
+                cout.until(b"\x1b[?5522l")
+                configured.run("set-option", "-s", "native-clipboard", "on")
+                cout.until(b"\x1b[?5522h")
+                configured.run("refresh-client", "-t", target,
+                               "-f", "!clipboard-fence")
+                cout.until(b"\x1b[?5522l")
+                assert b"!clipboard-fence" in configured.run(
+                    "list-clients", "-F", "#{client_flags}")
+                for setting in ("off", "on"):
+                    configured.run("set-option", "-s", "native-clipboard", setting)
+                    a.sendall(b"\x1b[?5522$p")
+                    inp.until(b"\x1b[?5522;0$y")
+                configured.run("refresh-client", "-t", target,
+                               "-f", "clipboard-fence")
+                cout.until(b"\x1b[?5522h")
+                configured.run("set-option", "-s", "native-clipboard", "off")
+                a.sendall(b"\x1b[?5522$p")
+                inp.until(b"\x1b[?5522;1$y")
+            finally:
+                configured.close()
+
+            # Policy changes cannot invalidate a split handoff fence response.
+            draining = Server(binary, root, "draining", native=True)
+            try:
+                _, a, inp = draining.pane(first=True)
+                dfd, dout = draining.attach(verified=False)
+                a.sendall(b"\x1b[?5522$p")
+                inp.until(b"\x1b[?5522;2$y")
+                pending = draining.command("detach-client")
+                ident = dout.frame()[0][b"id"]
+                opening = response(ident, b"OK")
+                os.write(dfd, opening[:-2])
+                time.sleep(0.05)
+                draining.run("set-option", "-s", "native-clipboard", "off")
+                os.write(dfd, opening[-2:] +
+                         response(ident, b"DATA", b"Lg==", b".") +
+                         response(ident, b"DONE"))
+                command_ok(pending)
+            finally:
+                draining.close()
+
             # Both an unsupported probe and a late positive reply stay unsupported.
-            unsupported = Server(binary, root, "unsupported")
+            unsupported = Server(binary, root, "unsupported", native=True)
             try:
                 _, a, inp = unsupported.pane(first=True)
-                late_fd, _ = unsupported.attach(support=None)
+                late_fd, _ = unsupported.attach(support=None, verified=False)
                 a.sendall(b"\x1b[?5522$p")
                 inp.until(b"\x1b[?5522;0$y")
                 os.write(late_fd, b"\x1b[?5522;2$y")
@@ -853,6 +958,16 @@ def main(binary):
                 assert inp.quiet() == b""
             finally:
                 unsupported.close()
+            negative = Server(binary, root, "negative", native=True)
+            try:
+                _, a, inp = negative.pane(first=True)
+                negative.attach(support=False, verified=False)
+                a.sendall(b"\x1b[?5522$p")
+                inp.until(b"\x1b[?5522;0$y")
+                a.sendall(osc(b"type=read:id=negative-probe", b"Lg=="))
+                assert inp.frame()[0][b"status"] == b"ENOSYS"
+            finally:
+                negative.close()
         finally:
             inner.close()
             server.close()

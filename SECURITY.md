@@ -5,9 +5,22 @@ about the immediate terminal peer, as well as a successful capability probe.
 The declaration is a local trust decision, not a property inferred from a
 terminal name, version, TERM value, or mode report.
 
-## Explicit per-attachment activation
+## Configuration and per-attachment overrides
 
-Use these only with a verified paired terminal implementation:
+For ordinary local or SSH attachments, put this in `tmux.conf`:
+
+```tmux
+set -s native-clipboard on
+```
+
+This server option is off by default. Enabling it declares that the immediate
+terminal peers provide the cancellation contract below; a successful outer
+capability probe is still required for each attachment. No launch wrapper,
+terminal-name matching, or provenance helper is needed. The option applies live
+to existing attachments and to ordinary `new-session` and `attach-session`
+clients. It is independent of the legacy OSC52 `set-clipboard` option.
+
+Optional per-attachment overrides take precedence over the server option:
 
 ```sh
 tmux attach-session -f clipboard-fence -t my-session
@@ -17,16 +30,22 @@ tmux new-session -f clipboard-fence -s my-session
 tmux list-clients -F '#{client_name}: #{client_flags} #{client_clipboard_state}'
 tmux refresh-client -t /dev/pts/123 -f clipboard-fence
 
-# Stop native mediation on that attachment.
+# Explicitly disable this attachment even when native-clipboard is on.
 tmux refresh-client -t /dev/pts/123 -f '!clipboard-fence'
 ```
 
-Replace the example client name with the intended attachment; do not enable all
-clients or infer trust from TERM. Opt in before starting a MIME-aware program,
-or have that program re-probe after changing the flag. If the attachment's
-outer probe failed, reattach to probe again. Each nested tmux attachment must
-opt in explicitly, and every hop must run the patched mediator with a verified
-outer attachment. There is no automatic trust propagation.
+Replace the example client name with the intended attachment. An explicit
+`clipboard-fence` remains enabled when the server option is turned off;
+`!clipboard-fence` remains disabled when it is turned on. A new attachment
+without either flag inherits the server option. `client_flags` shows explicit
+overrides, not the inherited option value.
+
+Enable before starting a MIME-aware program, or have that program re-probe after
+changing the option or flags. If the attachment's outer probe failed, reattach
+to probe again. Each nested tmux server must enable
+the option (or explicitly enable its attachment), and every hop must run the
+patched mediator with a verified outer attachment. There is no automatic trust
+propagation.
 
 The declared peer contract is stronger than generic OSC5522 capability:
 
@@ -37,11 +56,11 @@ The declared peer contract is stronger than generic OSC5522 capability:
 
 The paired WezTerm implementation and a chain of patched tmux mediators must
 establish these properties in code and tests. A generic terminal capability
-report does not establish them. Without the flag, pane probes report unsupported
+report does not establish them. Without opt-in, pane probes report unsupported
 and ordinary legacy text paste remains available. Unknown peers must stay off.
-Removing the flag revokes routing even with automatic paste mode disabled.
+Disabling mediation revokes routing even with automatic paste mode disabled.
 Cleanup obligations from the previously verified attachment remain; toggling the
-flag cannot erase framing state or release a quarantined attachment.
+option or flags cannot erase framing state or release a quarantined attachment.
 
 ## Trust and authority
 
@@ -126,7 +145,7 @@ to the command caller and through the control-mode notification
 Inspect `client_clipboard_state` from another trusted client:
 
 * `inactive`: no active clipboard attachment state;
-* `normal`: not in a handoff (check `client_flags` separately for opt-in);
+* `normal`: not in a handoff (check `native-clipboard` and `client_flags` for opt-in);
 * `draining`: a handoff is pending, for at most two seconds;
 * `quarantined`: the operation failed and the boundary is still unproven;
 * `quarantined-ready`: complete late proof arrived, but isolation remains.

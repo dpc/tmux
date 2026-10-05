@@ -1343,6 +1343,11 @@ options_push_changes(const char *name)
 
 	log_debug("%s: %s", __func__, name);
 
+	if (strcmp(name, "native-clipboard") == 0) {
+		TAILQ_FOREACH(loop, &clients, entry)
+			clipboard_sync(&loop->tty);
+	}
+
 	if (strcmp(name, "theme") == 0 ||
 	    strncmp(name, "dark-theme-", 11) == 0 ||
 	    strncmp(name, "light-theme-", 12) == 0) {

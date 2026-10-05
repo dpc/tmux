@@ -2897,6 +2897,12 @@ server_client_set_flags(struct client *c, const char *flags)
 			continue;
 
 		log_debug("client %s set flag %s", c->name, next);
+		if (flag == CLIENT_CLIPBOARD_FENCE) {
+			if (not)
+				c->flags |= CLIENT_NO_CLIPBOARD_FENCE;
+			else
+				c->flags &= ~CLIENT_NO_CLIPBOARD_FENCE;
+		}
 		if (not) {
 			if (c->flags & CLIENT_READONLY)
 				flag &= ~CLIENT_READONLY;
@@ -2944,6 +2950,8 @@ server_client_get_flags(struct client *c)
 		strlcat(s, "active-pane,", sizeof s);
 	if (c->flags & CLIENT_CLIPBOARD_FENCE)
 		strlcat(s, "clipboard-fence,", sizeof s);
+	if (c->flags & CLIENT_NO_CLIPBOARD_FENCE)
+		strlcat(s, "!clipboard-fence,", sizeof s);
 	if (c->flags & CLIENT_SUSPENDED)
 		strlcat(s, "suspended,", sizeof s);
 	if (c->flags & CLIENT_UTF8)

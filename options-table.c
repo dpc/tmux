@@ -490,6 +490,14 @@ const struct options_table_entry options_table[] = {
 	  .text = "Maximum number of server messages to keep."
 	},
 
+	{ .name = "native-clipboard",
+	  .type = OPTIONS_TABLE_FLAG,
+	  .scope = OPTIONS_TABLE_SERVER,
+	  .default_num = 0,
+	  .text = "Enable native OSC 5522 clipboard mediation after a positive "
+		  "terminal probe."
+	},
+
 	{ .name = "prefix-timeout",
 	  .type = OPTIONS_TABLE_NUMBER,
 	  .scope = OPTIONS_TABLE_SERVER,

@@ -8,8 +8,14 @@ This release runs on OpenBSD, FreeBSD, NetBSD, Linux, macOS and Solaris.
 
 * Native MIME clipboard support in this fork
 
-OSC5522 mediation is disabled unless an attachment explicitly opts into the
-verified peer ordering contract with the clipboard-fence client flag.
+OSC5522 mediation is off by default. Enable it for ordinary local and SSH
+attachments by adding this server option to tmux.conf:
+
+	set -s native-clipboard on
+
+Each attachment still needs a positive outer capability probe. Enabling declares
+the verified peer ordering contract; the optional clipboard-fence and
+!clipboard-fence client flags override the option for individual attachments.
 Read SECURITY.md before enabling it, especially its two-second handoff failure
 and quarantine behavior. A failed handoff is not a successful or secure lock.
 The isolated protocol regression suite is:

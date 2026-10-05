@@ -1113,14 +1113,20 @@ The flags are:
 the client has an independent active pane
 .It clipboard\-fence
 explicitly opt this attachment into native OSC 5522 mediation.
-Off by default.
+Overrides the
+.Ic native\-clipboard
+server option.
+Use
+.Ql !clipboard-fence
+to explicitly disable mediation for an attachment even when that option is on.
+Attachments without either flag inherit the option.
 Use only when the immediate terminal peer has a verified ordered clipboard
 cancellation contract: mode-off revokes old work, an already-started packet
 finishes, and no old worker can emit packets after a subsequent clipboard
 inventory response.
 A positive mode 5522 probe is also required; terminal names and versions do
 not imply this contract.
-Each attachment, including each nested tmux hop, must opt in explicitly.
+Each nested tmux hop must enable the option or explicitly opt in.
 Removing the flag revokes mediation but does not erase pending framing or
 cancellation obligations.
 .It ignore\-size
@@ -4917,6 +4923,37 @@ Once reached, the sequence will be discarded.
 .It Ic message\-limit Ar number
 Set the number of error or information messages to save in the message log for
 each client.
+.It Xo Ic native\-clipboard
+.Op Ic on | off
+.Xc
+Enable native OSC 5522 clipboard mediation for ordinary terminal attachments.
+The default is off.
+For example, put
+.Ql set -s native-clipboard on
+in
+.Pa tmux.conf .
+This server option applies to existing and future clients, including ordinary
+local and SSH attachments, without launch wrappers.
+Each attachment must also receive a positive outer mode 5522 capability reply.
+Enabling declares that terminal peers provide ordered clipboard cancellation:
+mode-off revokes old work, started packets finish, and no old worker emits
+packets after a subsequent inventory response.
+Terminal names and versions do not establish this contract.
+.Pp
+The client flags
+.Ic clipboard\-fence
+and
+.Ic !clipboard\-fence
+override the option, enabling and disabling mediation respectively.
+Turning the option off does not disable explicitly enabled clients.
+Disabling mediation revokes routing but preserves framing, cancellation and
+quarantine obligations.
+Applications may need to probe again after a change; failed outer probes
+require a fresh attachment.
+Each nested server must enable mediation separately.
+This option is independent of the legacy OSC 52
+.Ic set\-clipboard
+option.
 .It Ic prompt\-history\-limit Ar number
 Set the number of history items to save in the history file for each type of
 command prompt.

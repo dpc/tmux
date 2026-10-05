@@ -435,6 +435,15 @@ clipboard_invalid_write(struct window_pane *wp)
 	}
 }
 
+static int
+clipboard_opted_in(struct client *c)
+{
+	if (c->flags & CLIENT_NO_CLIPBOARD_FENCE)
+		return (0);
+	return ((c->flags & CLIENT_CLIPBOARD_FENCE) ||
+	    options_get_number(global_options, "native-clipboard"));
+}
+
 void
 clipboard_sync(struct tty *tty)
 {
@@ -443,15 +452,16 @@ clipboard_sync(struct tty *tty)
 	u_int			 owner, session;
 	int			 enabled, opted_in;
 
-	if (cb == NULL)
+	/* A handoff owns its generation until completion, even if policy changes. */
+	if (cb == NULL || cb->closing)
 		return;
 	wp = clipboard_pane(cb);
 	owner = wp != NULL ? wp->id : CLIPBOARD_NO_PANE;
 	session = tty->client->session != NULL ?
 	    tty->client->session->id : UINT_MAX;
-	opted_in = !!(tty->client->flags & CLIENT_CLIPBOARD_FENCE);
+	opted_in = clipboard_opted_in(tty->client);
 	if (opted_in && cb->supported)
-		cb->verified = 1; /* Cleanup obligations survive flag removal. */
+		cb->verified = 1; /* Cleanup obligations survive disabling. */
 	enabled = opted_in && cb->supported && wp != NULL &&
 	    (wp->base.mode & MODE_CLIPBOARD);
 	if (owner == cb->owner && session == cb->session &&
@@ -486,8 +496,7 @@ clipboard_queries(struct clipboard *cb)
 		wp = window_pane_find_by_id(cb->queries[i]);
 		if (wp == NULL || wp->event == NULL)
 			continue;
-		state = cb->supported &&
-		    (cb->tty->client->flags & CLIENT_CLIPBOARD_FENCE) ?
+		state = cb->supported && clipboard_opted_in(cb->tty->client) ?
 		    ((wp->base.mode & MODE_CLIPBOARD) ? 1 : 2) : 0;
 		xsnprintf(reply, sizeof reply, "\033[?5522;%d$y", state);
 		bufferevent_write(wp->event, reply, strlen(reply));
@@ -854,7 +863,7 @@ clipboard_client(struct window_pane *wp, const char *pw, const char *loc,
 			}
 		}
 		if (!cb->supported ||
-		    !(c->flags & CLIENT_CLIPBOARD_FENCE) ||
+		    !clipboard_opted_in(c) ||
 		    clipboard_pane(cb) == NULL ||
 		    !session_has(c->session, wp->window))
 			continue;
@@ -882,7 +891,7 @@ clipboard_query(struct window_pane *wp)
 		return (0);
 	TAILQ_FOREACH(c, &clients, entry) {
 		cb = c->tty.clipboard;
-		if (cb == NULL || !(c->flags & CLIENT_CLIPBOARD_FENCE) ||
+		if (cb == NULL || !clipboard_opted_in(c) ||
 		    clipboard_pane(cb) == NULL ||
 		    !session_has(c->session, wp->window))
 			continue;
