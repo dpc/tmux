@@ -2810,7 +2810,7 @@ void	clipboard_request(struct window_pane *, const char *);
 int	clipboard_key(struct tty *, const char *, size_t, size_t *);
 int	clipboard_blocked(struct window_pane *);
 void	clipboard_reset_pane(struct window_pane *);
-void	clipboard_invalid_write(struct window_pane *);
+void	clipboard_invalid_write(struct window_pane *, const char *);
 void	clipboard_pane_drained(struct window_pane *);
 void	clipboard_written(struct tty *, size_t);
 int	clipboard_drain(struct tty *, int);

@@ -71,6 +71,45 @@ objects, select a preferred MIME type, or apply Tau's artifact-ingestion limit.
 Reads, writes, write chunks, aliases, primary selection, and arbitrary MIME
 payloads are routed rather than stored as tmux paste buffers.
 
+### Opaque file-export transport
+
+The opt-in also routes the dedicated `write-file` / `write-file-data` family.
+The terminal, not tmux, owns file-bundle validation, staging, native copied-file
+publication, permissions and cleanup. tmux neither reads paths nor interprets
+the MIME value or bundle. A private MIME in an ordinary `write` remains an
+ordinary clipboard write.
+
+An opener has exactly `type=write-file:id=ID`. Every chunk has exactly
+`type=write-file-data:id=ID:mime=MIME;PAYLOAD`. The commit has exactly
+`type=write-file-data:id=ID`, without MIME or payload separator. `loc` (even
+empty), aliases, unknown keys and duplicate keys are forbidden. The nonempty ID
+must contain only `[a-zA-Z0-9-_+.]`; tmux rejects unsafe file IDs rather than
+sanitizing them. Each continuation must match the original opener ID before
+tmux rewrites it to the fresh outer ID. Chunk MIME and payload remain opaque;
+the terminal enforces the selected MIME and validates the complete bundle.
+
+There is no admission handshake. Only `type=write-file:id=ID:status=STATUS`
+is a file reply; STATUS is DONE after commit or EPERM, ENOSYS, EBUSY, EINVAL,
+EFBIG or EIO. The mapping remains pinned until that reply or cancellation,
+including while a terminal publishes asynchronously after commit. A timeout
+reports file EIO and revokes the generation; a lost reply or cancellation after
+commit can leave publication outcome unknown. No retry or raw fallback occurs.
+
+Raw and file continuations cannot append to, commit or poison the other
+family's transaction. Recognizably malformed packets abort only their own
+family. If corrupt framing cannot identify a family, tmux retains the existing
+fail-closed rule and aborts the active write rather than committing a truncated
+prefix. Before commit, file aborts use file-data poison, never raw `wdata`.
+After commit, aborts revoke the generation because poison cannot retract an
+already admitted asynchronous publication.
+
+All hops must implement this family for export to work. Older mediators ignore
+both new packet types, including with a pending raw write: file bytes and the
+file commit must never be encoded as ordinary `wdata`. An old hop can therefore
+cause a timeout, but cannot accidentally commit file bytes to the raw clipboard.
+The existing opt-in, probe, ownership, framing, backpressure and handoff rules
+still apply; this transport does not advertise a separate file capability.
+
 Native OSC packets require the canonical `ESC ] 5522 ;` introducer.
 Leading-zero, integer-overflow, and control-stripped numeric aliases are not
 accepted through the generic OSC parser.
@@ -192,6 +231,14 @@ pane-facing FIFO test also verifies that an application which keeps reading
 through mode-off and a fresh metadata reply receives the full old packet suffix
 before that reply, with late old responses suppressed across attachments.
 Protected-output pressure tests verify display recovery after protocol drain.
+
+`python3 regress/clipboard-file.py ./tmux [OLD_TMUX]` checks file-kind routing,
+strict metadata and IDs, family isolation, asynchronous lifetime and
+cancellation, nested mapping, attachment pinning, contention, backpressure and
+log privacy. Supplying a pre-file-family native-mediator binary additionally
+tests an actual old hop inside and outside a new hop, including a pending raw
+write. Like the main regression, it only uses private servers and mock peers;
+it neither stages files nor accesses the desktop clipboard.
 
 These tests do not establish the native desktop backend's correctness, provide a
 real clipboard permission prompt, or prove end-to-end WezTerm/SSH/Tau operation.

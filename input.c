@@ -808,7 +808,7 @@ input_ground_timer_callback(__unused int fd, __unused short events, void *arg)
 	    ictx->input_len >= 5 &&
 	    strncmp(ictx->input_buf, "5522;", 5) == 0) {
 		ictx->flags |= INPUT_DISCARD;
-		clipboard_invalid_write(ictx->wp);
+		clipboard_invalid_write(ictx->wp, ictx->input_buf + 5);
 		return; /* Consume through terminator, not into screen/log output. */
 	}
 	input_reset(ictx, 0);
@@ -968,6 +968,7 @@ input_parse(struct input_ctx *ictx, const u_char *buf, size_t len)
 	const struct input_state	*state = NULL;
 	const struct input_transition	*itr = NULL;
 	size_t				 off = 0;
+	int				 discarded;
 
 	/* Parse the input. */
 	while (off < len) {
@@ -985,11 +986,14 @@ input_parse(struct input_ctx *ictx, const u_char *buf, size_t len)
 		if (ictx->state == &input_state_osc_string &&
 		    ictx->input_len >= 5 &&
 		    strncmp(ictx->input_buf, "5522;", 5) == 0) {
+			discarded = (ictx->flags & INPUT_DISCARD);
 			if (ictx->ch == '\007' ||
 			    (ictx->clipboard_escape && ictx->ch == '\\')) {
 				if (ictx->ch == '\007' && ictx->clipboard_escape) {
 					ictx->flags |= INPUT_DISCARD;
-					clipboard_invalid_write(ictx->wp);
+					if (!discarded)
+						clipboard_invalid_write(ictx->wp,
+						    ictx->input_buf + 5);
 				}
 				input_exit_osc(ictx);
 				ictx->state = &input_state_ground;
@@ -998,7 +1002,9 @@ input_parse(struct input_ctx *ictx, const u_char *buf, size_t len)
 			} else if (ictx->ch == '\033') {
 				if (ictx->clipboard_escape) {
 					ictx->flags |= INPUT_DISCARD;
-					clipboard_invalid_write(ictx->wp);
+					if (!discarded)
+						clipboard_invalid_write(ictx->wp,
+						    ictx->input_buf + 5);
 				}
 				ictx->clipboard_escape = 1;
 			} else {
@@ -1008,8 +1014,9 @@ input_parse(struct input_ctx *ictx, const u_char *buf, size_t len)
 				ictx->clipboard_escape = 0;
 				if (!(ictx->flags & INPUT_DISCARD))
 					input_input(ictx);
-				if (ictx->flags & INPUT_DISCARD)
-					clipboard_invalid_write(ictx->wp);
+				if (!discarded && (ictx->flags & INPUT_DISCARD))
+					clipboard_invalid_write(ictx->wp,
+					    ictx->input_buf + 5);
 			}
 			continue;
 		}
@@ -2747,7 +2754,7 @@ input_exit_osc(struct input_ctx *ictx)
 	if (ictx->flags & INPUT_DISCARD) {
 		if (ictx->input_len >= 5 &&
 		    strncmp(p, "5522;", 5) == 0)
-			clipboard_invalid_write(wp);
+			clipboard_invalid_write(wp, p + 5);
 		return;
 	}
 	if (ictx->input_len < 1 || *p < '0' || *p > '9')
@@ -2759,7 +2766,7 @@ input_exit_osc(struct input_ctx *ictx)
 	option = 0;
 	while (*p >= '0' && *p <= '9') {
 		if (option > (UINT_MAX - (*p - '0')) / 10) {
-			clipboard_invalid_write(wp);
+			clipboard_invalid_write(wp, NULL);
 			return;
 		}
 		option = option * 10 + *p++ - '0';
@@ -2810,7 +2817,7 @@ input_exit_osc(struct input_ctx *ictx)
 	case 5522:
 		if (ictx->clipboard_prefix_invalid ||
 		    strncmp(ictx->input_buf, "5522;", 5) != 0)
-			clipboard_invalid_write(wp);
+			clipboard_invalid_write(wp, p);
 		else
 			clipboard_request(wp, p);
 		break;

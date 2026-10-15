@@ -36,6 +36,12 @@
 #define CLIPBOARD_TIMEOUT 30000
 #define CLIPBOARD_NO_PANE UINT_MAX
 
+enum clipboard_write_kind {
+	CLIPBOARD_WRITE_NONE,
+	CLIPBOARD_WRITE_RAW,
+	CLIPBOARD_WRITE_FILE
+};
+
 struct clipboard_packet {
 	char	*storage;
 	char	*type;
@@ -46,6 +52,8 @@ struct clipboard_packet {
 	char	*loc;
 	char	*mime;
 	const char *body;
+	int	 unknown;
+	int	 safe_id;
 };
 
 struct clipboard_output {
@@ -83,7 +91,8 @@ struct clipboard {
 	int		 deny_unknown_grants;
 	uint64_t	 grant_time;
 	u_int		 request_pane;
-	int		 writing;
+	enum clipboard_write_kind write_kind;
+	int		 file_committed;
 	char		*original_id;
 	char		 mapped_id[64];
 	uint64_t	 request_time;
@@ -381,7 +390,8 @@ static void
 clipboard_clear_request(struct clipboard *cb)
 {
 	cb->request_pane = CLIPBOARD_NO_PANE;
-	cb->writing = cb->read_started = cb->granted = 0;
+	cb->write_kind = CLIPBOARD_WRITE_NONE;
+	cb->file_committed = cb->read_started = cb->granted = 0;
 	free(cb->original_id);
 	cb->original_id = NULL;
 	*cb->mapped_id = '\0';
@@ -412,8 +422,14 @@ clipboard_clear_grant(struct clipboard *cb)
  * prefix. Poison the outer transaction with invalid base64 (specified EINVAL),
  * then forget its mapping and drain the pane's continuations.
  */
-void
-clipboard_invalid_write(struct window_pane *wp)
+static const char *
+clipboard_write_type(struct clipboard *cb)
+{
+	return (cb->write_kind == CLIPBOARD_WRITE_FILE ? "write-file" : "write");
+}
+
+static void
+clipboard_abort_write(struct window_pane *wp, enum clipboard_write_kind kind)
 {
 	struct client		*c;
 	struct clipboard	*cb;
@@ -423,14 +439,26 @@ clipboard_invalid_write(struct window_pane *wp)
 		return;
 	TAILQ_FOREACH(c, &clients, entry) {
 		cb = c->tty.clipboard;
-		if (cb == NULL || !cb->writing || cb->request_pane != wp->id)
+		if (cb == NULL || cb->write_kind == CLIPBOARD_WRITE_NONE ||
+		    cb->request_pane != wp->id ||
+		    (kind != CLIPBOARD_WRITE_NONE && cb->write_kind != kind))
 			continue;
-		xasprintf(&abort, "\033]5522;type=wdata:id=%s:"
-		    "mime=YXBwbGljYXRpb24vb2N0ZXQtc3RyZWFt;!\033\\",
-		    cb->mapped_id);
-		clipboard_send(cb, abort, strlen(abort));
-		free(abort);
-		clipboard_reply(wp, "write", cb->original_id, "EINVAL");
+		if (cb->file_committed) {
+			/* Poison cannot revoke an admitted asynchronous publication. */
+			cb->generation++;
+			clipboard_cancel_output(cb);
+			if (cb->enabled)
+				clipboard_send(cb, "\033[?5522h", 8);
+		} else {
+			xasprintf(&abort, "\033]5522;type=%s:id=%s:"
+			    "mime=YXBwbGljYXRpb24vb2N0ZXQtc3RyZWFt;!\033\\",
+			    cb->write_kind == CLIPBOARD_WRITE_FILE ?
+			    "write-file-data" : "wdata", cb->mapped_id);
+			clipboard_send(cb, abort, strlen(abort));
+			free(abort);
+		}
+		clipboard_reply(wp, clipboard_write_type(cb),
+		    cb->original_id, "EINVAL");
 		clipboard_clear_request(cb);
 	}
 }
@@ -703,9 +731,9 @@ clipboard_tick(__unused int fd, __unused short events, void *data)
 		clipboard_clear_grant(cb);
 	if (cb->request_pane != CLIPBOARD_NO_PANE &&
 	    now - cb->request_time >= CLIPBOARD_TIMEOUT) {
-		if (cb->writing)
+		if (cb->write_kind != CLIPBOARD_WRITE_NONE)
 			clipboard_reply(window_pane_find_by_id(cb->request_pane),
-			    "write", cb->original_id, "EIO");
+			    clipboard_write_type(cb), cb->original_id, "EIO");
 		clipboard_cancel_output(cb);
 		if (cb->enabled)
 			clipboard_send(cb, "\033[?5522h", 8);
@@ -739,6 +767,7 @@ clipboard_parse(const char *body, struct clipboard_packet *p)
 {
 	char	*meta, *field, *equal, **slot;
 	size_t	 i;
+	int	 valid = 1;
 
 	memset(p, 0, sizeof *p);
 	p->body = body;
@@ -749,8 +778,10 @@ clipboard_parse(const char *body, struct clipboard_packet *p)
 		*field = '\0';
 	while ((field = strsep(&meta, ":")) != NULL) {
 		equal = strchr(field, '=');
-		if (equal == NULL || equal == field)
-			return (0);
+		if (equal == NULL || equal == field) {
+			valid = 0;
+			continue;
+		}
 		*equal++ = '\0';
 		slot = NULL;
 		if (strcmp(field, "type") == 0)
@@ -769,9 +800,11 @@ clipboard_parse(const char *body, struct clipboard_packet *p)
 			slot = &p->mime;
 		if (slot != NULL) {
 			if (*slot != NULL)
-				return (0);
-			*slot = equal;
-		}
+				valid = 0;
+			else
+				*slot = equal;
+		} else
+			p->unknown = 1;
 	}
 	/* No controls, which could escape the OSC when forwarded. */
 	for (i = 0; body[i] != '\0'; i++) {
@@ -779,6 +812,14 @@ clipboard_parse(const char *body, struct clipboard_packet *p)
 			return (0);
 	}
 	if (p->id != NULL) {
+		p->safe_id = *p->id != '\0' &&
+		    strspn(p->id, "abcdefghijklmnopqrstuvwxyz"
+		    "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_+.") == strlen(p->id);
+		/* File IDs must never collapse onto a different canonical ID. */
+		if (p->type != NULL &&
+		    (strcmp(p->type, "write-file") == 0 ||
+		    strcmp(p->type, "write-file-data") == 0))
+			return (valid);
 		/* The protocol requires removal of unsafe ID characters. */
 		equal = p->id;
 		for (field = p->id; *field != '\0'; field++) {
@@ -788,7 +829,56 @@ clipboard_parse(const char *body, struct clipboard_packet *p)
 		}
 		*equal = '\0';
 	}
-	return (p->type != NULL);
+	return (valid && p->type != NULL);
+}
+
+static enum clipboard_write_kind
+clipboard_packet_kind(struct clipboard_packet *p)
+{
+	if (p->type != NULL) {
+		if (strcmp(p->type, "write-file") == 0 ||
+		    strcmp(p->type, "write-file-data") == 0)
+			return (CLIPBOARD_WRITE_FILE);
+		if (strcmp(p->type, "write") == 0 ||
+		    strcmp(p->type, "wdata") == 0 ||
+		    strcmp(p->type, "walias") == 0)
+			return (CLIPBOARD_WRITE_RAW);
+	}
+	return (CLIPBOARD_WRITE_NONE);
+}
+
+void
+clipboard_invalid_write(struct window_pane *wp, const char *body)
+{
+	struct clipboard_packet	p;
+	enum clipboard_write_kind kind = CLIPBOARD_WRITE_NONE;
+
+	/*
+	 * A damaged packet can still identify its family. If it cannot, preserve
+	 * the framing fail-closed rule rather than committing a truncated prefix.
+	 */
+	if (body != NULL) {
+		clipboard_parse(body, &p);
+		kind = clipboard_packet_kind(&p);
+		free(p.storage);
+	}
+	clipboard_abort_write(wp, kind);
+}
+
+/* New-family metadata is closed; payload and MIME interpretation are not ours. */
+static int
+clipboard_file_request_valid(struct clipboard_packet *p, int continuation)
+{
+	const char *payload = strchr(p->body, ';');
+
+	if (!p->safe_id || p->unknown || p->status != NULL ||
+	    p->pw != NULL || p->name != NULL || p->loc != NULL)
+		return (0);
+	if (!continuation)
+		return (p->mime == NULL && payload == NULL);
+	return ((p->mime == NULL && payload == NULL) ||
+	    (p->mime != NULL && *p->mime != '\0' && payload != NULL &&
+	    payload[1] != '\0'));
 }
 
 /* Rebuild only id; all other metadata and the payload are untouched. */
@@ -920,35 +1010,52 @@ clipboard_request(struct window_pane *wp, const char *body)
 	struct client		*c;
 	char			*mapped;
 	uint32_t		 nonce[4];
-	int			 continuation, writing, denied;
+	int			 continuation, denied, valid, file;
+	enum clipboard_write_kind kind;
 
 	if (wp == NULL)
 		goto out;
-	if (!clipboard_parse(body, &p)) {
-		clipboard_invalid_write(wp);
+	valid = clipboard_parse(body, &p);
+	kind = clipboard_packet_kind(&p);
+	file = kind == CLIPBOARD_WRITE_FILE;
+	if (!valid) {
+		clipboard_abort_write(wp, kind);
+		if (file && strcmp(p.type, "write-file") == 0)
+			clipboard_reply(wp, "write-file",
+			    p.safe_id ? p.id : NULL, "EINVAL");
 		goto out;
 	}
-	if (p.status != NULL) {
-		clipboard_invalid_write(wp);
+	if (!file && p.status != NULL) {
+		clipboard_abort_write(wp, kind);
 		goto out;
 	}
-	writing = strcmp(p.type, "write") == 0;
 	continuation = strcmp(p.type, "wdata") == 0 ||
-	    strcmp(p.type, "walias") == 0;
+	    strcmp(p.type, "walias") == 0 ||
+	    strcmp(p.type, "write-file-data") == 0;
+	if (file && !continuation && !clipboard_file_request_valid(&p, 0)) {
+		clipboard_reply(wp, "write-file",
+		    p.safe_id ? p.id : NULL, "EINVAL");
+		goto out;
+	}
 	if (continuation) {
 		TAILQ_FOREACH(c, &clients, entry) {
 			cb = c->tty.clipboard;
 			if (cb != NULL)
 				clipboard_sync(&c->tty);
-			if (cb != NULL && cb->writing &&
+			if (cb != NULL && cb->write_kind == kind &&
 			    cb->request_pane == wp->id)
 				break;
 			cb = NULL;
 		}
 		if (cb == NULL)
 			goto out; /* Drain failed/cancelled writes. */
+		if (file && (!clipboard_file_request_valid(&p, 1) ||
+		    strcmp(p.id, cb->original_id) != 0 || cb->file_committed)) {
+			clipboard_abort_write(wp, CLIPBOARD_WRITE_FILE);
+			goto out;
+		}
 	} else {
-		if (!writing && strcmp(p.type, "read") != 0)
+		if (kind == CLIPBOARD_WRITE_NONE && strcmp(p.type, "read") != 0)
 			goto out;
 		cb = clipboard_client(wp, p.pw, p.loc, &denied);
 		if (cb == NULL) {
@@ -966,8 +1073,9 @@ clipboard_request(struct window_pane *wp, const char *body)
 			}
 		}
 		if (cb->request_pane != CLIPBOARD_NO_PANE) {
-			/* A new write by its owner replaces the previous write. */
-			if (!writing || !cb->writing ||
+			/* Only the legacy raw family permits implicit replacement. */
+			if (kind != CLIPBOARD_WRITE_RAW ||
+			    cb->write_kind != CLIPBOARD_WRITE_RAW ||
 			    cb->request_pane != wp->id) {
 				clipboard_reply(wp, p.type, p.id, "EBUSY");
 				goto out;
@@ -975,7 +1083,7 @@ clipboard_request(struct window_pane *wp, const char *body)
 			clipboard_clear_request(cb);
 		}
 		cb->request_pane = wp->id;
-		cb->writing = writing;
+		cb->write_kind = kind;
 		cb->granted = p.pw != NULL && p.name != NULL &&
 		    *p.name != '\0' && cb->grant != NULL &&
 		    strcmp(p.pw, cb->grant) == 0;
@@ -985,6 +1093,8 @@ clipboard_request(struct window_pane *wp, const char *body)
 		    "tmux-%08x%08x%08x%08x",
 		    nonce[0], nonce[1], nonce[2], nonce[3]);
 	}
+	if (file && continuation && p.mime == NULL)
+		cb->file_committed = 1;
 	mapped = clipboard_map(body, cb->mapped_id);
 	clipboard_send(cb, mapped, strlen(mapped));
 	free(mapped);
@@ -1086,7 +1196,21 @@ clipboard_response(struct clipboard *cb, const char *body)
 		    strcmp(p.id, cb->mapped_id) != 0)
 			goto out;
 		if (p.status == NULL ||
-		    strcmp(p.type, cb->writing ? "write" : "read") != 0) {
+		    strcmp(p.type, cb->write_kind != CLIPBOARD_WRITE_NONE ?
+		    clipboard_write_type(cb) : "read") != 0) {
+			clipboard_corrupt_response(cb);
+			goto out;
+		}
+		if (cb->write_kind == CLIPBOARD_WRITE_FILE &&
+		    (!p.safe_id || p.unknown || p.pw != NULL || p.name != NULL ||
+		    p.loc != NULL || p.mime != NULL || strchr(body, ';') != NULL ||
+		    (strcmp(p.status, "DONE") == 0 ? !cb->file_committed :
+		    (strcmp(p.status, "EPERM") != 0 &&
+		    strcmp(p.status, "ENOSYS") != 0 &&
+		    strcmp(p.status, "EBUSY") != 0 &&
+		    strcmp(p.status, "EINVAL") != 0 &&
+		    strcmp(p.status, "EFBIG") != 0 &&
+		    strcmp(p.status, "EIO") != 0)))) {
 			clipboard_corrupt_response(cb);
 			goto out;
 		}
@@ -1095,7 +1219,7 @@ clipboard_response(struct clipboard *cb, const char *body)
 			clipboard_clear_request(cb);
 			goto out;
 		}
-		if (cb->writing)
+		if (cb->write_kind != CLIPBOARD_WRITE_NONE)
 			done = 1;
 		else if (strcmp(p.status, "OK") == 0) {
 			if (cb->read_started) {
