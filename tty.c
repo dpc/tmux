@@ -51,7 +51,6 @@ static void	tty_check_bg(struct tty *, struct colour_palette *,
 		    struct grid_cell *);
 static void	tty_check_us(struct tty *, struct colour_palette *,
 		    struct grid_cell *);
-static int	tty_map_theme_colour(struct tty *, int);
 static void	tty_colours_fg(struct tty *, const struct grid_cell *);
 static void	tty_colours_bg(struct tty *, const struct grid_cell *);
 static void	tty_colours_us(struct tty *, const struct grid_cell *);
@@ -373,6 +372,10 @@ tty_start_tty(struct tty *tty)
 		tty_putcode(tty, TTYC_ENBP);
 
 	if (tty->term->flags & TERM_VT100LIKE) {
+		if (!tty->border_probed) {
+			tty_puts(tty, "\033P1+bcell-border;q\033\\");
+			tty->border_probed = 1;
+		}
 		/* Subscribe to theme changes and request theme now. */
 		tty_puts(tty, "\033[?2031h\033[?996n");
 	}
@@ -2796,7 +2799,7 @@ tty_colours(struct tty *tty, const struct grid_cell *gc)
 		tty_colours_us(tty, gc);
 }
 
-static int
+int
 tty_map_theme_colour(struct tty *tty, int colour)
 {
 	struct client	*c;

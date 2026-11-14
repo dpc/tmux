@@ -118,6 +118,7 @@ struct input_ctx {
 #define INPUT_BUF_START 32
 	u_char			       *input_buf;
 	size_t				input_len;
+	int				border_invalid;
 	size_t				input_space;
 	enum input_end_type		input_end;
 
@@ -270,6 +271,7 @@ enum input_csi_type {
 	INPUT_CSI_DCH,
 	INPUT_CSI_DECSCUSR,
 	INPUT_CSI_DECSTBM,
+	INPUT_CSI_DECSTR,
 	INPUT_CSI_DL,
 	INPUT_CSI_DSR,
 	INPUT_CSI_DSR_PRIVATE,
@@ -337,6 +339,7 @@ static const struct input_table_entry input_csi_table[] = {
 	{ 'n', "",  INPUT_CSI_DSR },
 	{ 'n', ">", INPUT_CSI_MODOFF },
 	{ 'n', "?", INPUT_CSI_DSR_PRIVATE },
+	{ 'p', "!",  INPUT_CSI_DECSTR },
 	{ 'p', "$",  INPUT_CSI_QUERY },
 	{ 'p', "?$", INPUT_CSI_QUERY_PRIVATE },
 	{ 'q', " ", INPUT_CSI_DECSCUSR },
@@ -962,6 +965,10 @@ input_parse(struct input_ctx *ictx, const u_char *buf, size_t len)
 	/* Parse the input. */
 	while (off < len) {
 		ictx->ch = buf[off++];
+		sctx->s->grid->border_pen = ictx->cell.cell.border;
+		if (ictx->state == &input_state_dcs_escape &&
+		    ictx->ch != '\\')
+			ictx->border_invalid = 1;
 
 		/* Find the transition. */
 		if (ictx->state != state ||
@@ -1004,7 +1011,9 @@ input_parse(struct input_ctx *ictx, const u_char *buf, size_t len)
 			input_set_state(ictx, itr);
 
 		/* If not in ground state, save input. */
-		if (ictx->state != &input_state_ground)
+		if (ictx->state != &input_state_ground &&
+		    !(ictx->interm_len == 1 && ictx->interm_buf[0] == '+' &&
+		    ictx->input_len >= 257))
 			evbuffer_add(ictx->since_ground, &ictx->ch, 1);
 	}
 }
@@ -1261,6 +1270,11 @@ input_input(struct input_ctx *ictx)
 {
 	size_t available;
 
+	if (ictx->interm_len == 1 && ictx->interm_buf[0] == '+' &&
+	    ictx->input_len >= 257) {
+		ictx->flags |= INPUT_DISCARD;
+		return (0);
+	}
 	available = ictx->input_space;
 	while (ictx->input_len + 1 >= available) {
 		available *= 2;
@@ -1304,6 +1318,8 @@ input_c0_dispatch(struct input_ctx *ictx)
 		screen_write_backspace(sctx);
 		break;
 	case '\011':	/* HT */
+		/* A tab moves the cursor; do not materialize it over borders. */
+		has_content = s->grid->border_used;
 		/* Don't tab beyond the end of the line. */
 		cx = s->cx;
 		if (cx >= screen_size_x(s) - 1)
@@ -1591,6 +1607,9 @@ input_csi_dispatch(struct input_ctx *ictx)
 		n = input_get(ictx, 0, 1, 1);
 		if (n != -1)
 			screen_write_deletecharacter(sctx, n, bg);
+		break;
+	case INPUT_CSI_DECSTR:
+		memset(&ictx->cell.cell.border, 0, sizeof ictx->cell.cell.border);
 		break;
 	case INPUT_CSI_DECSTBM:
 		n = input_get(ictx, 0, 1, 1);
@@ -1911,6 +1930,8 @@ input_csi_dispatch_rm_private(struct input_ctx *ictx)
 			screen_write_mode_clear(sctx, MODE_KCURSOR);
 			break;
 		case 3:		/* DECCOLM */
+			memset(&sctx->s->grid->border_pen, 0,
+			    sizeof sctx->s->grid->border_pen);
 			screen_write_cursormove(sctx, 0, 0, 1);
 			screen_write_clearscreen(sctx, gc->bg);
 			break;
@@ -1946,6 +1967,9 @@ input_csi_dispatch_rm_private(struct input_ctx *ictx)
 		case 47:
 		case 1047:
 			screen_write_alternateoff(sctx, gc, 0);
+			break;
+		case 1048:
+			input_restore_state(ictx);
 			break;
 		case 1049:
 			screen_write_alternateoff(sctx, gc, 1);
@@ -2008,6 +2032,8 @@ input_csi_dispatch_sm_private(struct input_ctx *ictx)
 			screen_write_mode_set(sctx, MODE_KCURSOR);
 			break;
 		case 3:		/* DECCOLM */
+			memset(&sctx->s->grid->border_pen, 0,
+			    sizeof sctx->s->grid->border_pen);
 			screen_write_cursormove(sctx, 0, 0, 1);
 			screen_write_clearscreen(sctx, ictx->cell.cell.bg);
 			break;
@@ -2049,6 +2075,9 @@ input_csi_dispatch_sm_private(struct input_ctx *ictx)
 		case 47:
 		case 1047:
 			screen_write_alternateon(sctx, gc, 0);
+			break;
+		case 1048:
+			input_save_state(ictx);
 			break;
 		case 1049:
 			screen_write_alternateon(sctx, gc, 1);
@@ -2520,6 +2549,7 @@ input_enter_dcs(struct input_ctx *ictx)
 	log_debug("%s", __func__);
 
 	input_clear(ictx);
+	ictx->border_invalid = 0;
 	input_start_ground_timer(ictx);
 	ictx->flags &= ~INPUT_LAST;
 }
@@ -2602,6 +2632,11 @@ input_dcs_dispatch(struct input_ctx *ictx)
 	const char		 prefix[] = "tmux;";
 	const u_int		 prefixlen = (sizeof prefix) - 1;
 	long long		 allow_passthrough = 0;
+	struct cell_border_command border;
+	struct grid_cell	 gc;
+	struct screen		*s = sctx->s;
+	u_int			 x, y, ox, features;
+	char			 feature_string[128];
 #ifdef ENABLE_SIXEL
 	struct window		*w;
 	struct sixel_image	*si;
@@ -2615,6 +2650,48 @@ input_dcs_dispatch(struct input_ctx *ictx)
 
 	if (ictx->flags & INPUT_DISCARD) {
 		log_debug("%s: %zu bytes (discard)", __func__, len);
+		return (0);
+	}
+
+	if (ictx->interm_len == 1 && ictx->interm_buf[0] == '+' &&
+	    len >= 1 && buf[0] == 'b') {
+		if (ictx->border_invalid || input_split(ictx) != 0 ||
+		    ictx->param_list_len != 1 || input_get(ictx, 0, 0, -1) != 1 ||
+		    !cell_border_parse(buf + 1, len - 1, &border))
+			return (0);
+		if (border.op == CELL_BORDER_QUERY) {
+			features = cell_border_features(wp);
+			if (features != 0) {
+				cell_border_feature_string(features, feature_string,
+				    sizeof feature_string);
+				input_reply(ictx, 1, "\033P1+bcell-border;ok;1;%s\033\\",
+				    feature_string);
+			}
+			return (0);
+		}
+		screen_write_collect_end(sctx);
+		s->grid->border_used = 1;
+		if (border.op == CELL_BORDER_PEN ||
+		    border.op == CELL_BORDER_PEN_CLEAR ||
+		    border.op == CELL_BORDER_PEN_ROUND ||
+		    border.op == CELL_BORDER_PEN_SQUARE)
+			cell_border_apply(&ictx->cell.cell.border, &border);
+		else {
+			/* cx == sx represents pending wrap, not a cell offscreen. */
+			ox = s->cx;
+			if (ox >= screen_size_x(s))
+				ox = screen_size_x(s) - 1;
+			for (y = s->cy; y < screen_size_y(s) &&
+			    y - s->cy < border.rows; y++) {
+				for (x = ox; x < screen_size_x(s) &&
+				    x - ox < border.cols; x++) {
+					grid_view_get_cell(s->grid, x, y, &gc);
+					cell_border_apply(&gc.border, &border);
+					grid_view_set_cell(s->grid, x, y, &gc);
+				}
+			}
+			screen_write_border_dirty(sctx);
+		}
 		return (0);
 	}
 
