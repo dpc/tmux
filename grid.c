@@ -40,7 +40,7 @@
 
 /* Default grid cell data. */
 const struct grid_cell grid_default_cell = {
-	{ { ' ' }, 0, 1, 1 }, 0, 0, 8, 8, 8, 0
+	{ { ' ' }, 0, 1, 1 }, 0, 0, 8, 8, 8, 0, { .mask = 0 }
 };
 
 /*
@@ -48,12 +48,12 @@ const struct grid_cell grid_default_cell = {
  * appears in the grid - because of this, they are always extended cells.
  */
 static const struct grid_cell grid_padding_cell = {
-	{ { '!' }, 0, 0, 0 }, 0, GRID_FLAG_PADDING, 8, 8, 8, 0
+	{ { '!' }, 0, 0, 0 }, 0, GRID_FLAG_PADDING, 8, 8, 8, 0, { .mask = 0 }
 };
 
 /* Cleared grid cell data. */
 static const struct grid_cell grid_cleared_cell = {
-	{ { ' ' }, 0, 1, 1 }, 0, GRID_FLAG_CLEARED, 8, 8, 8, 0
+	{ { ' ' }, 0, 1, 1 }, 0, GRID_FLAG_CLEARED, 8, 8, 8, 0, { .mask = 0 }
 };
 static const struct grid_cell_entry grid_cleared_entry = {
 	{ .data = { 0, 8, 8, ' ' } }, GRID_FLAG_CLEARED
@@ -132,6 +132,8 @@ grid_need_extended_cell(const struct grid_cell_entry *gce,
 		return (1);
 	if (gc->link != 0)
 		return (1);
+	if (!cell_border_empty(&gc->border))
+		return (1);
 	if (gc->flags & GRID_FLAG_TAB)
 		return (1);
 	return (0);
@@ -181,6 +183,7 @@ grid_extended_cell(struct grid_line *gl, struct grid_cell_entry *gce,
 	gee->bg = gc->bg;
 	gee->us = gc->us;
 	gee->link = gc->link;
+	memcpy(&gee->border, &gc->border, sizeof gee->border);
 	return (gee);
 }
 
@@ -249,6 +252,19 @@ grid_clear_cell(struct grid *gd, u_int px, u_int py, u_int bg, int moved)
 	struct grid_extd_entry	*gee;
 	u_int			 old_offset = gce->offset;
 	int			 had_extd = (gce->flags & GRID_FLAG_EXTENDED);
+	struct grid_cell	 blank = grid_cleared_cell;
+
+	if (!cell_border_empty(&gd->border_pen)) {
+		blank.bg = bg;
+		blank.border = gd->border_pen;
+		blank.flags &= ~GRID_FLAG_CLEARED;
+		if (moved)
+			memcpy(gce, &grid_cleared_entry, sizeof *gce);
+		grid_extended_cell(gl, gce, &blank);
+		if (px + 1 > gl->cellused)
+			gl->cellused = px + 1;
+		return;
+	}
 
 	memcpy(gce, &grid_cleared_entry, sizeof *gce);
 	if (!moved && had_extd && old_offset < gl->extdsize) {
@@ -294,6 +310,8 @@ grid_cells_look_equal(const struct grid_cell *gc1, const struct grid_cell *gc2)
 	if ((flags1 & ~GRID_FLAG_CLEARED) != (flags2 & ~GRID_FLAG_CLEARED))
 		return (0);
 	if (gc1->link != gc2->link)
+		return (0);
+	if (memcmp(&gc1->border, &gc2->border, sizeof gc1->border) != 0)
 		return (0);
 	return (1);
 }
@@ -543,6 +561,7 @@ grid_expand_line(struct grid *gd, u_int py, u_int sx, u_int bg)
 {
 	struct grid_line	*gl;
 	u_int			 xx;
+	struct cell_border	 pen;
 
 	gl = &gd->linedata[py];
 	if (sx <= gl->cellsize)
@@ -561,8 +580,12 @@ grid_expand_line(struct grid *gd, u_int py, u_int sx, u_int bg)
 		memset(gl->celldata + gl->cellsize, 0,
 		    (sx - gl->cellsize) * sizeof *gl->celldata);
 	}
+	/* Allocation is not an application erase. Do not paint the pen here. */
+	pen = gd->border_pen;
+	memset(&gd->border_pen, 0, sizeof gd->border_pen);
 	for (xx = gl->cellsize; xx < sx; xx++)
 		grid_clear_cell(gd, xx, py, bg, 0);
+	gd->border_pen = pen;
 	gl->cellsize = sx;
 }
 
@@ -570,9 +593,14 @@ grid_expand_line(struct grid *gd, u_int py, u_int sx, u_int bg)
 void
 grid_empty_line(struct grid *gd, u_int py, u_int bg)
 {
+	u_int x;
+
 	memset(&gd->linedata[py], 0, sizeof gd->linedata[py]);
-	if (!COLOUR_DEFAULT(bg))
+	if (!COLOUR_DEFAULT(bg) || !cell_border_empty(&gd->border_pen))
 		grid_expand_line(gd, py, gd->sx, bg);
+	if (!cell_border_empty(&gd->border_pen))
+		for (x = 0; x < gd->sx; x++)
+			grid_clear_cell(gd, x, py, bg, 0);
 }
 
 /* Peek at grid line. */
@@ -591,6 +619,7 @@ grid_get_cell1(struct grid_line *gl, u_int px, struct grid_cell *gc)
 	struct grid_cell_entry	*gce = &gl->celldata[px];
 	struct grid_extd_entry	*gee;
 
+	memset(&gc->border, 0, sizeof gc->border);
 	if (gce->flags & GRID_FLAG_EXTENDED) {
 		if (gce->offset >= gl->extdsize)
 			memcpy(gc, &grid_default_cell, sizeof *gc);
@@ -602,6 +631,7 @@ grid_get_cell1(struct grid_line *gl, u_int px, struct grid_cell *gc)
 			gc->bg = gee->bg;
 			gc->us = gee->us;
 			gc->link = gee->link;
+			memcpy(&gc->border, &gee->border, sizeof gc->border);
 
 			if (gc->flags & GRID_FLAG_TAB)
 				grid_set_tab(gc, gee->data);
@@ -641,10 +671,19 @@ grid_set_cell(struct grid *gd, u_int px, u_int py, const struct grid_cell *gc)
 {
 	struct grid_line	*gl;
 	struct grid_cell_entry	*gce;
+	struct grid_cell	 blank;
+
+	if (gc == &grid_default_cell && !cell_border_empty(&gd->border_pen)) {
+		blank = *gc;
+		blank.border = gd->border_pen;
+		gc = &blank;
+	}
 
 	if (grid_check_y(gd, __func__, py) != 0)
 		return;
 
+	if (!cell_border_empty(&gc->border))
+		gd->border_used = 1;
 	grid_expand_line(gd, py, px + 1, 8);
 
 	gl = &gd->linedata[py];
@@ -662,7 +701,12 @@ grid_set_cell(struct grid *gd, u_int px, u_int py, const struct grid_cell *gc)
 void
 grid_set_padding(struct grid *gd, u_int px, u_int py)
 {
-	grid_set_cell(gd, px, py, &grid_padding_cell);
+	struct grid_cell gc = grid_padding_cell;
+
+	gc.border = gd->border_pen;
+	gc.border.mask &= ~192; /* Left edge of the second half. */
+	gc.border.joints &= ~9;
+	grid_set_cell(gd, px, py, &gc);
 }
 
 /* Set cells at position. */
@@ -678,6 +722,8 @@ grid_set_cells(struct grid *gd, u_int px, u_int py, const struct grid_cell *gc,
 	if (grid_check_y(gd, __func__, py) != 0)
 		return;
 
+	if (!cell_border_empty(&gc->border))
+		gd->border_used = 1;
 	grid_expand_line(gd, py, px + slen, 8);
 
 	gl = &gd->linedata[py];
@@ -721,7 +767,7 @@ grid_clear(struct grid *gd, u_int px, u_int py, u_int nx, u_int ny, u_int bg)
 		if (sx > gl->cellsize)
 			sx = gl->cellsize;
 		ox = nx;
-		if (COLOUR_DEFAULT(bg)) {
+		if (COLOUR_DEFAULT(bg) && cell_border_empty(&gd->border_pen)) {
 			if (px > sx)
 				continue;
 			if (px + nx > sx)
@@ -1255,6 +1301,8 @@ grid_duplicate_lines(struct grid *dst, u_int dy, struct grid *src, u_int sy,
 	struct grid_line	*dstl, *srcl;
 	u_int			 yy;
 
+	if (src->border_used)
+		dst->border_used = 1;
 	if (dy + ny > dst->hsize + dst->sy)
 		ny = dst->hsize + dst->sy - dy;
 	if (sy + ny > src->hsize + src->sy)
@@ -1652,7 +1700,7 @@ grid_line_length(struct grid *gd, u_int py)
 		grid_get_cell(gd, px - 1, py, &gc);
 		if ((gc.flags & GRID_FLAG_PADDING) ||
 		    gc.data.size != 1 ||
-		    *gc.data.data != ' ')
+		    *gc.data.data != ' ' || !cell_border_empty(&gc.border))
 			break;
 		px--;
 	}

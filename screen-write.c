@@ -224,6 +224,8 @@ screen_write_should_draw_lines(struct screen_write_ctx *ctx, u_int y, u_int ny)
 	u_int			 sy = screen_size_y(s);
 	bitstr_t		*bs;
 
+	if (wp != NULL && s->grid->border_used && !(s->mode & MODE_SYNC))
+		wp->flags |= PANE_REDRAW;
 	if (wp != NULL && (wp->flags & (PANE_REDRAW|PANE_DROP)))
 		return (0);
 	if (s->mode & MODE_SYNC) {
@@ -248,6 +250,13 @@ screen_write_should_draw_lines(struct screen_write_ctx *ctx, u_int y, u_int ny)
 		return (0);
 	}
 	return (1);
+}
+
+/* Rectangle edits must participate in the synchronized-output dirty set. */
+void
+screen_write_border_dirty(struct screen_write_ctx *ctx)
+{
+	screen_write_should_draw_lines(ctx, 0, screen_size_y(ctx->s));
 }
 
 /* Should we draw this line to the TTY? */
@@ -414,6 +423,7 @@ screen_write_stop(struct screen_write_ctx *ctx)
 	screen_write_collect_flush(ctx, 0, __func__);
 
 	screen_write_free_citem(ctx->item);
+	memset(&ctx->s->grid->border_pen, 0, sizeof ctx->s->grid->border_pen);
 }
 
 /* Reset screen state. */
@@ -422,6 +432,9 @@ screen_write_reset(struct screen_write_ctx *ctx)
 {
 	struct screen	*s = ctx->s;
 
+	cell_border_reset_grid(s->grid);
+	cell_border_reset_grid(s->saved_grid);
+	memset(&s->saved_cell.border, 0, sizeof s->saved_cell.border);
 	screen_reset_tabs(s);
 	screen_write_scrollregion(ctx, 0, screen_size_y(s) - 1);
 
@@ -709,6 +722,12 @@ screen_write_fast_copy(struct screen_write_ctx *ctx, struct screen *src,
 			ttyctx.ocx++;
 
 			s->cx++;
+		}
+		if (gd->border_used) {
+			ttyctx.ocx = cx;
+			ttyctx.ocy = s->cy;
+			ttyctx.n = nx;
+			tty_write(tty_cmd_redrawline, &ttyctx);
 		}
 		s->cy++;
 	}
@@ -1227,7 +1246,7 @@ screen_write_redraw_line(struct screen_write_ctx *ctx, struct tty_ctx *ttyctx,
 		ttyctx->ocx = cx;
 		ttyctx->ocy = yy;
 
-		if (ttyctx->n != 1) {
+		if (ttyctx->n != 1 || s->grid->border_used) {
 			tty_write(tty_cmd_redrawline, ttyctx);
 			continue;
 		}
@@ -1306,6 +1325,7 @@ screen_write_alignmenttest(struct screen_write_ctx *ctx)
 	u_int			 xx, yy;
 
 	memcpy(&gc, &grid_default_cell, sizeof gc);
+	gc.border = s->grid->border_pen;
 	utf8_set(&gc.data, 'E');
 
 #ifdef ENABLE_SIXEL
@@ -2566,9 +2586,17 @@ screen_write_collect_add(struct screen_write_ctx *ctx,
 {
 	struct screen			*s = ctx->s;
 	struct screen_write_citem	*ci;
+	struct grid_cell		 first;
 	u_int				 sx = screen_size_x(s);
 	int				 collect;
 
+	/* Printing a wide glyph omits its internal edge, unlike copying cells. */
+	if (gc->data.width == 2) {
+		first = *gc;
+		first.border.mask &= ~12;
+		first.border.joints &= ~6;
+		gc = &first;
+	}
 	/*
 	 * Don't need to check that the attributes and whatnot are still the
 	 * same - input_parse will end the collection when anything that isn't
@@ -2631,6 +2659,9 @@ screen_write_cell(struct screen_write_ctx *ctx, const struct grid_cell *gc)
 	int			 yoff = 0, xoff = 0;
 	struct visible_ranges	*r;
 	struct visible_range	*ri;
+
+	if (gd->border_used)
+		skip = 0;
 
 	/* Ignore padding cells. */
 	if (gc->flags & GRID_FLAG_PADDING)
@@ -2723,8 +2754,9 @@ screen_write_cell(struct screen_write_ctx *ctx, const struct grid_cell *gc)
 		memcpy(&tmp_gc, gc, sizeof tmp_gc);
 		tmp_gc.flags &= ~GRID_FLAG_SELECTED;
 		grid_view_set_cell(gd, s->cx, s->cy, &tmp_gc);
-	} else if (!skip)
+	} else if (!skip) {
 		grid_view_set_cell(gd, s->cx, s->cy, gc);
+	}
 	if (selected)
 		skip = 0;
 
@@ -2888,6 +2920,8 @@ screen_write_combine(struct screen_write_ctx *ctx, const struct grid_cell *gc)
 	/* Force the width to 2 for modifiers and variation selector. */
 	if (last.data.width == 1 && force_wide) {
 		last.data.width = 2;
+		last.border.mask &= ~12;
+		last.border.joints &= ~6;
 		n = 2;
 		cx++;
 	} else

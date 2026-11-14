@@ -5004,7 +5004,7 @@ window_copy_write_one(struct window_mode_entry *wme,
 {
 	struct window_copy_mode_data	*data = wme->data;
 	struct grid			*gd = data->backing->grid;
-	struct grid_cell		 gc;
+	struct grid_cell		 gc, target;
 	u_int		 		 fx;
 
 	screen_write_cursormove(ctx, px, py, 0);
@@ -5014,8 +5014,17 @@ window_copy_write_one(struct window_mode_entry *wme,
 			window_copy_update_style(wme, fx, fy, &gc, mgc, cgc,
 			    mkgc);
 			screen_write_cell(ctx, &gc);
+			/*
+			 * This is a physical cell copy, not another print of
+			 * the pen. Keep independent wide-cell rectangle edits.
+			 */
+			grid_view_get_cell(ctx->s->grid, px + fx, py, &target);
+			target.border = gc.border;
+			grid_view_set_cell(ctx->s->grid, px + fx, py, &target);
 		}
 	}
+	if (gd->border_used)
+		screen_write_border_dirty(ctx);
 }
 
 static int

@@ -758,6 +758,24 @@ tty_keys_next(struct tty *tty)
 	len = EVBUFFER_LENGTH(tty->in);
 	if (len == 0)
 		return (0);
+	/* Once identified, native border replies are not keyboard escape keys. */
+	if (!(tty->flags & TTY_BRACKETPASTE)) {
+		switch (cell_border_reply(tty, buf, len, &size)) {
+		case 0:
+			if (event_initialized(&tty->key_timer))
+				evtimer_del(&tty->key_timer);
+			tty->flags &= ~TTY_TIMER;
+			evbuffer_drain(tty->in, size);
+			return (1);
+		case 1:
+			if (event_initialized(&tty->key_timer))
+				evtimer_del(&tty->key_timer);
+			tty->flags &= ~TTY_TIMER;
+			return (0);
+		case 2:
+			goto partial_key;
+		}
+	}
 	/* Consume sensitive protocol input before all keyboard diagnostics. */
 	switch (clipboard_key(tty, buf, len, &size)) {
 	case 0:

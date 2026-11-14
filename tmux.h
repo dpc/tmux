@@ -839,6 +839,42 @@ struct colour_palette {
 #define PADDED_BORDERS "             "
 
 /* Grid cell data. */
+/* Draft cell-border v1. Value storage keeps grid moves and reflow self-contained. */
+struct cell_border_stroke {
+	int		colour;
+	u_char		width;
+	u_char		placement;
+	u_char		layer;
+	u_char		style;
+	u_char		priority;
+};
+
+struct cell_border {
+	struct cell_border_stroke strokes[12];
+	int		outside;	/* -1: none, 8: terminal default */
+	u_short		mask;
+	u_short		radius;		/* zero: terminal default */
+	u_char		joints;
+	u_char		has_outside;
+};
+
+struct cell_border_command {
+	struct cell_border_stroke stroke;
+	u_int		mask, rows, cols;
+	int		op, outside, radius;
+};
+#define CELL_BORDER_QUERY 0
+#define CELL_BORDER_PEN 1
+#define CELL_BORDER_PEN_CLEAR 2
+#define CELL_BORDER_SET 3
+#define CELL_BORDER_CLEAR 4
+#define CELL_BORDER_PEN_ROUND 5
+#define CELL_BORDER_PEN_SQUARE 6
+#define CELL_BORDER_ROUND 7
+#define CELL_BORDER_SQUARE 8
+#define CELL_BORDER_BASE 31
+#define CELL_BORDER_ALL 1023
+
 struct grid_cell {
 	struct utf8_data	data;
 	u_short			attr;
@@ -847,6 +883,7 @@ struct grid_cell {
 	int			bg;
 	int			us;
 	u_int			link;
+	struct cell_border	border;
 };
 
 /* Grid extended cell entry. */
@@ -858,6 +895,7 @@ struct grid_extd_entry {
 	int			bg;
 	int			us;
 	u_int			link;
+	struct cell_border	border;
 } __packed;
 
 /* Grid cell entry. */
@@ -904,6 +942,8 @@ struct grid {
 	u_int			 scroll_generation;
 
 	struct grid_line	*linedata;
+	struct cell_border border_pen;
+	int		 border_used;
 };
 
 /* Virtual cursor in a grid. */
@@ -1699,6 +1739,10 @@ struct tty_style_ctx {
 /* Client terminal. */
 struct tty {
 	struct client	*client;
+	u_int		 border_features;
+	int		 border_probed;
+	int		 border_discard;
+	int		 border_escape;
 	struct clipboard	*clipboard;
 	int		 clipboard_discard;
 	int		 clipboard_report;
@@ -3383,6 +3427,16 @@ int	 attributes_fromstring(const char *);
 bitstr_t	*fuzzy_match(const char *, const char *, u_int, u_int *);
 
 /* grid.c */
+int	 cell_border_parse(const char *, size_t, struct cell_border_command *);
+void	 cell_border_apply(struct cell_border *, const struct cell_border_command *);
+int	 cell_border_empty(const struct cell_border *);
+void	 cell_border_reset_grid(struct grid *);
+u_int	 cell_border_features(struct window_pane *);
+void	 cell_border_feature_string(u_int, char *, size_t);
+int	 cell_border_reply(struct tty *, const char *, size_t, size_t *);
+void	 cell_border_draw(struct tty *, struct screen *, u_int, u_int,
+	     u_int, u_int, u_int, const struct tty_style_ctx *);
+int	 tty_map_theme_colour(struct tty *, int);
 extern const struct grid_cell grid_default_cell;
 void	 grid_check_is_clear(struct grid *);
 void	 grid_empty_line(struct grid *, u_int, u_int);
@@ -3535,6 +3589,7 @@ void	 screen_write_collect_end(struct screen_write_ctx *);
 void	 screen_write_collect_add(struct screen_write_ctx *,
 	     const struct grid_cell *);
 void	 screen_write_cell(struct screen_write_ctx *, const struct grid_cell *);
+void	 screen_write_border_dirty(struct screen_write_ctx *);
 void	 screen_write_setselection(struct screen_write_ctx *, const char *,
 	     u_char *, u_int);
 void	 screen_write_rawstring(struct screen_write_ctx *, u_char *, u_int,
