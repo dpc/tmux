@@ -5440,6 +5440,31 @@ gives a status line one row in height;
 or
 .Ic 5
 more rows.
+.It Xo Ic status\-border
+.Op Ic off | single | double | dashed | dotted
+.Xc
+Draw a native cell border on the pane-facing edge of the status line:
+above a bottom status line or below a top status line.
+For a multiline status line, draw only the edge of the whole status area.
+The default is
+.Ic off .
+The border uses no extra row and does not change pane content.
+This requires a terminal advertising the experimental native cell-border
+protocol; other terminals retain the ordinary status line.
+Terminals supporting borders but not line styles use a single line.
+The border remains during status messages and prompts, but is not drawn when
+the status line is disabled or fills the terminal.
+.It Ic status\-border\-colour Ar colour
+Set the native status border colour.
+The default is
+.Ic default ,
+the terminal default foreground, independent of status text.
+Accept the usual colour names, palette indices, RGB and theme colours.
+.It Ic status\-border\-width Ar width
+Set the native status border thickness from 1 to 64, in units of 1/256 of the
+cell width.
+The default is 8; the terminal draws at least one device pixel.
+The stroke is inside the status cells and above their text.
 .It Ic status\-format[] Ar format
 Specify the format to be used for each line of the status line.
 The default builds the top status line from the various individual status

@@ -1696,6 +1696,10 @@ redraw_draw(struct client *c, struct window_pane *wp, int flags)
 		sl = c->status.active;
 		for (i = 0; i < lines; i++)
 			tty_draw_line(tty, sl, 0, i, UINT_MAX, 0, y + i, NULL);
+		if (dctx.status_lines != 0 && lines < tty->sy)
+			cell_border_draw_status(c,
+			    (dctx.flags & REDRAW_STATUS_TOP) ? lines - 1 : y,
+			    !!(dctx.flags & REDRAW_STATUS_TOP));
 	}
 	if (c->overlay_draw != NULL && (flags & REDRAW_OVERLAY))
 		c->overlay_draw(c, c->overlay_data);

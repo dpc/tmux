@@ -10,6 +10,7 @@ import os
 import re
 import select
 import shlex
+import signal
 import socket
 import struct
 import subprocess
@@ -840,11 +841,113 @@ def vs16(server):
     assert not set(segments(screen, 0, 1)) & {6, 7}, screen[0, 1]
 
 
+def status_border(server):
+    pane, app = server.pane(first=True)
+    terminal = server.attach()
+    server.run("set", "-g", "status", "on")
+    assert not any(cell["segments"] for cell in terminal.snapshot().values())
+    server.run("set", "-g", "status-border-colour", "#ffffff")
+    server.run("set", "-g", "status-border", "single")
+
+    def line(row, bits, style="solid", colour="ffffff", width="8"):
+        screen = terminal.snapshot()
+        for col in range(WIDTH):
+            expected = {bit: ((width, colour, "0", "1"), style, "0")
+                        for bit in bits}
+            assert segments(screen, row, col) == expected, (row, col, screen)
+        for (y, x), cell in screen.items():
+            if y != row:
+                assert not cell["segments"], (y, x, cell)
+
+    line(HEIGHT - 1, (0, 1))
+    server.run("set", "-g", "status", "3")
+    line(HEIGHT - 3, (0, 1))
+    server.run("set", "-g", "status-position", "top")
+    line(2, (4, 5))
+    for style in ("double", "dashed", "dotted"):
+        server.run("set", "-g", "status-border", style)
+        line(2, (4, 5), style)
+    server.run("set", "-g", "status-border-colour", "colour123")
+    server.run("set", "-g", "status-border-width", "16")
+    line(2, (4, 5), "dotted", "p123", "16")
+    server.run("display-message", "-d", "10000", "status border message")
+    line(2, (4, 5), "dotted", "p123", "16")
+    server.run("send-keys", "-t", pane, "Escape")
+    server.run("copy-mode", "-t", pane)
+    line(2, (4, 5), "dotted", "p123", "16")
+    server.run("send-keys", "-t", pane, "-X", "cancel")
+    server.run("set", "-g", "status-border", "off")
+    assert not any(cell["segments"] for cell in terminal.snapshot().values())
+    server.run("set", "-g", "status-border", "single")
+    server.run("set", "-g", "status", "off")
+    assert not any(cell["segments"] for cell in terminal.snapshot().values())
+    # A prompt with status disabled is not itself a status bar.
+    server.run("command-prompt", "-b", "-p", "Prompt", "display-message '%%'")
+    assert not any(cell["segments"] for cell in terminal.snapshot().values())
+    server.run("send-keys", "Escape")
+    server.run("set", "-g", "status", "on")
+    line(0, (4, 5), "solid", "p123", "16")
+    # Pane output and pane borders must not acquire status decoration.
+    server.pane()
+    app.sendall(b"\x1b[2J\x1b[Hpane text")
+    server.query(app)
+    line(0, (4, 5), "solid", "p123", "16")
+
+
+def status_border_clients(server):
+    _, app = server.pane(first=True)
+    server.run("set", "-g", "status", "on")
+    server.run("set", "-g", "status-border", "double")
+    server.run("set", "-g", "status-border-colour", "white")
+    full = server.attach()
+    basic = server.attach(features=BASE)
+    unsupported = server.attach(features=None)
+    for terminal, style in ((full, "double"), (basic, "solid")):
+        screen = terminal.snapshot()
+        for col in range(WIDTH):
+            assert segments(screen, HEIGHT - 1, col) == {
+                bit: (("8", "p7", "0", "1"), style, "0") for bit in (0, 1)}
+    assert not any(cell["segments"] for cell in unsupported.snapshot().values())
+    assert not any(frame.startswith("set;") for frame in unsupported.frames)
+    # Session options use each client's capability, not the pane intersection.
+    assert server.query(app) == []
+
+
+def status_border_resize(server):
+    _, app = server.pane(first=True)
+    terminal = server.attach()
+    server.run("set", "-g", "status", "3")
+    server.run("set", "-g", "status-border", "single")
+    server.run("set", "-g", "status-border-colour", "#ffffff")
+    process = server.clients[0][0]
+    for rows, cols in ((18, 60), (HEIGHT, WIDTH), (4, 40), (HEIGHT, WIDTH)):
+        fcntl.ioctl(terminal.fd, 0x5414, struct.pack("HHHH", rows, cols, 0, 0))
+        process.send_signal(signal.SIGWINCH)
+        time.sleep(.3)
+        screen = terminal.snapshot()
+        # Only inspect the current viewport; resized-away cells are undefined.
+        for row in range(rows):
+            for col in range(cols):
+                expected = {bit: (("8", "ffffff", "0", "1"), "solid", "0")
+                            for bit in (0, 1)} if row == rows - 3 else {}
+                assert segments(screen, row, col) == expected, (rows, cols, row, col)
+    # A bordered application cell stays distinct from the status separator.
+    server.run("resize-window", "-x", str(WIDTH), "-y", str(HEIGHT - 3))
+    app.sendall(b"\x1b[H" + dcs("pen;12;8;123456;0;0") + b"A\x1b[0m")
+    screen = server.sync(app, terminal)
+    has(screen, 0, 0, 12, "123456")
+    server.run("set", "-g", "status-border", "off")
+    screen = terminal.snapshot()
+    has(screen, 0, 0, 12, "123456")
+    assert not segments(screen, HEIGHT - 3, 0)
+
+
 TESTS = {test.__name__: test for test in
          (negotiation, insufficient, state, offsets, movement, extensions, wide,
           reflow, screens, live, synchronized, framing, palette, delayed_reply,
           pending_wrap, copy_mode, one_column, horizontal_tab, alignment,
-          save_1048, capability_tokens, vs16)}
+          save_1048, capability_tokens, vs16, status_border, status_border_clients,
+          status_border_resize)}
 
 
 def main():

@@ -1,5 +1,7 @@
 CHANGES FROM 3.7a TO 3.7b
 
+* Add opt-in native status borders with configurable style, colour and width.
+
 * Fix so that the end of a synchronized update again triggers a redraw.
 
 CHANGES FROM 3.7 TO 3.7a
