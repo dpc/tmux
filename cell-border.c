@@ -359,6 +359,47 @@ border_format_colour(struct tty *tty, const struct tty_style_ctx *style_ctx,
 }
 
 /*
+ * Draw inside the status cells, never over pane content or into another row.
+ * Text redraw clears the previous border, including when the option is off.
+ */
+void
+cell_border_draw_status(struct client *c, u_int y, int top)
+{
+	struct tty		*tty = &c->tty;
+	struct options		*oo = c->session->options;
+	struct tty_style_ctx	 style_ctx = { .defaults = &grid_default_cell };
+	struct visible_ranges	*r;
+	struct visible_range	*rr;
+	static const char	*styles[] = { "", "solid", "double", "dashed",
+				     "dotted" };
+	char			 buf[128], colour[16], extension[32] = "";
+	u_int			 i, width;
+	int			 style;
+
+	style = options_get_number(oo, "status-border");
+	if (style == 0 || y >= tty->sy ||
+	    (tty->border_features & CELL_BORDER_BASE) != CELL_BORDER_BASE)
+		return;
+	width = options_get_number(oo, "status-border-width");
+	border_format_colour(tty, &style_ctx,
+	    options_get_number(oo, "status-border-colour"), 0, colour,
+	    sizeof colour);
+	if (tty->border_features & (1U << 5))
+		xsnprintf(extension, sizeof extension, ";style=%s", styles[style]);
+	r = tty_check_overlay_range(tty, 0, y, tty->sx);
+	for (i = 0; i < r->used; i++) {
+		rr = &r->ranges[i];
+		if (rr->nx == 0)
+			continue;
+		tty_cursor(tty, rr->px, y);
+		xsnprintf(buf, sizeof buf,
+		    "\033P1+bcell-border;set;%u;%u;%s;0;1;1;%u%s\033\\",
+		    top ? 48 : 3, width, colour, rr->nx, extension);
+		tty_puts(tty, buf);
+	}
+}
+
+/*
  * Text redraw runs with an empty outer pen. Restore physical cell attributes
  * afterwards: this also handles two different borders on the halves of a wide
  * glyph. Coordinates are the already clipped terminal coordinates, not the

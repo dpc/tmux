@@ -81,6 +81,40 @@ of this implementation.
 No support is inferred from the terminal name. Unknown terminal implementations
 and future draft revisions require fresh capability and compatibility testing.
 
+## Status separator
+
+The session option `status-border` adds an opt-in separator using the same native
+protocol. It accepts `off` (the default), `single`, `double`, `dashed` and `dotted`.
+The separator runs along the pane-facing edge of the status area: above a bottom
+status bar or below a top one. A multiline status bar has one separator. The
+separator does not allocate another row or change pane content. Messages and
+prompts retain the separator while status is enabled; a prompt alone with status
+disabled does not create a separator. A status area filling the terminal has no pane-facing
+edge and gets no separator.
+
+`status-border-colour` accepts tmux colour names (including `white`), palette
+colours such as `colour123`, RGB such as `#ffffff`, and theme colours. The default
+is `default`, meaning the terminal default foreground, not the status text
+colour. Palette colours follow the terminal palette; RGB gives an explicit
+colour independent of that palette.
+
+`status-border-width` is 1 through 64, in protocol units of 1/256 of a cell's
+width, default 8. The terminal rounds this to at least one device pixel. Strokes
+are fixed inside the status cells and above text, without spilling into panes.
+There are no corner radius, priority or layer options for this straight line.
+
+For an explicit white single line:
+
+```tmux
+set -g status-border single
+set -g status-border-colour '#ffffff'
+```
+
+tmux evaluates capabilities separately for each client. Unsupported terminals
+retain the ordinary status bar, without a box-drawing fallback or extra row.
+Clients supporting basic borders but not the optional `style` capability use
+a single line. No capability is inferred from the terminal name.
+
 ## Verification
 
 Build with the project's normal autotools workflow. One Nix development-shell
@@ -92,10 +126,11 @@ nix-shell -p autoconf automake pkg-config libevent ncurses bison \
 python3 regress/cell-border.py /absolute/path/to/tmux
 ```
 
-The 22-scenario regression uses private servers, PTYs and mock terminal clients.
+The 25-scenario regression uses private servers, PTYs and mock terminal clients.
 It checks negotiation, malformed and fragmented input, retained edits, pane
 offsets, scrolling, reflow, wide glyphs and combining expansion, copy mode,
-palette changes, synchronized output, cursor motion, alignment and saved state.
+palette changes, synchronized output, cursor motion, alignment, saved state,
+status separators and client resize.
 It also checks existing output without forcing a refresh.
 
 For reproducible wire captures:

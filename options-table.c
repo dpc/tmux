@@ -41,6 +41,9 @@ static const char *options_table_clock_mode_style_list[] = {
 static const char *options_table_status_list[] = {
 	"off", "on", "2", "3", "4", "5", NULL
 };
+static const char *options_table_status_border_list[] = {
+	"off", "single", "double", "dashed", "dotted", NULL
+};
 static const char *options_table_message_line_list[] = {
 	"0", "1", "2", "3", "4", NULL
 };
@@ -1109,6 +1112,30 @@ const struct options_table_entry options_table[] = {
 	  .flags = OPTIONS_TABLE_IS_STYLE,
 	  .separator = ",",
 	  .text = "Style of the left side of the status line."
+	},
+
+	{ .name = "status-border",
+	  .type = OPTIONS_TABLE_CHOICE,
+	  .scope = OPTIONS_TABLE_SESSION,
+	  .choices = options_table_status_border_list,
+	  .default_num = 0,
+	  .text = "Native border on the pane-facing edge of the status line."
+	},
+
+	{ .name = "status-border-colour",
+	  .type = OPTIONS_TABLE_COLOUR,
+	  .scope = OPTIONS_TABLE_SESSION,
+	  .default_num = 8,
+	  .text = "Colour of the native status border."
+	},
+
+	{ .name = "status-border-width",
+	  .type = OPTIONS_TABLE_NUMBER,
+	  .scope = OPTIONS_TABLE_SESSION,
+	  .minimum = 1,
+	  .maximum = 64,
+	  .default_num = 8,
+	  .text = "Native status border thickness in 1/256 of a cell width."
 	},
 
 	{ .name = "status-position",

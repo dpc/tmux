@@ -3436,6 +3436,7 @@ void	 cell_border_feature_string(u_int, char *, size_t);
 int	 cell_border_reply(struct tty *, const char *, size_t, size_t *);
 void	 cell_border_draw(struct tty *, struct screen *, u_int, u_int,
 	     u_int, u_int, u_int, const struct tty_style_ctx *);
+void	 cell_border_draw_status(struct client *, u_int, int);
 int	 tty_map_theme_colour(struct tty *, int);
 extern const struct grid_cell grid_default_cell;
 void	 grid_check_is_clear(struct grid *);
